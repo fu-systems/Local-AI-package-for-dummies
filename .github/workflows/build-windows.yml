@@ -1,0 +1,235 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "toolshed/**"
+      - "packaging/**"
+      - "pyproject.toml"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "37 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYSIDE6_VERSION: "6.11.2"
+  PYINSTALLER_VERSION: "6.22.2"
+  SIZE_BUDGET_MIB: "400"
+
+jobs:
+  build:
+    # Windows Server 2025. Inno Setup 6.7.1 and 7-Zip are preinstalled, and
+    # Python 3.12 is in the runner tool cache so setup-python is a cache hit.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Exclude the workspace from Defender
+        continue-on-error: true
+        run: |
+          # Real-time scanning of every file PyInstaller writes costs minutes
+          # per build. The runner is administrator, so this is permitted.
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionProcess "python.exe"
+
+      - name: Install the app and build tools
+        run: |
+          python -m pip install --upgrade pip
+          # `pip install .`, never `-e .`; see the Linux workflow for why.
+          python -m pip install .
+          python -m pip install "PySide6-Essentials==$env:PYSIDE6_VERSION" `
+                                "pyinstaller==$env:PYINSTALLER_VERSION"
+          python -c "import toolshed, PySide6; print(toolshed.__version__, PySide6.__version__)"
+
+      - name: Resolve the version
+        id: ver
+        run: |
+          $v = python -c "import toolshed; print(toolshed.__version__)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            Write-Error "tag $env:GITHUB_REF_NAME does not match toolshed.__version__ v$v"
+            exit 1
+          }
+
+      - name: Generate the VERSIONINFO resource
+        run: |
+          python packaging/windows/make_version_info.py `
+            --version "${{ steps.ver.outputs.version }}" --out build/version_info.txt
+          Get-Content build/version_info.txt
+
+      - name: PyInstaller
+        run: |
+          pyinstaller --clean --noconfirm --log-level=INFO packaging/windows/toolshed.spec
+          $mb = [math]::Round((Get-ChildItem dist/toolshed -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+          Write-Host "bundle $mb MiB (budget $env:SIZE_BUDGET_MIB MiB)"
+          if ($mb -gt [int]$env:SIZE_BUDGET_MIB) {
+            Write-Error "bundle $mb MiB exceeds the $env:SIZE_BUDGET_MIB MiB budget"; exit 1
+          }
+
+      - name: The Visual C++ runtime must be bundled
+        run: |
+          # PyInstaller collects these so the app runs on a machine with no
+          # VC++ redistributable installed. When that silently does not happen
+          # it only breaks on a clean Windows box -- that is, on a beginner's
+          # machine, never on ours.
+          $need = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+          $have = Get-ChildItem dist/toolshed/_internal -Filter *.dll |
+                  Select-Object -ExpandProperty Name
+          foreach ($d in $need) {
+            if ($have -notcontains $d) { Write-Error "missing $d in the bundle"; exit 1 }
+          }
+          Write-Host "VC++ runtime present"
+
+      - name: Smoke test — console executable
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          & "dist/toolshed/toolshed-console.exe" --selftest
+          if ($LASTEXITCODE -ne 0) { Write-Error "console selftest failed"; exit 1 }
+          Remove-Item env:QT_QPA_PLATFORM
+
+      - name: Smoke test — windowed executable, real Windows platform plugin
+        run: |
+          # Exactly what a user launches: console=False, so sys.stdout and
+          # sys.stderr are None and toolshed/_streams.py is load-bearing. A
+          # windowed executable cannot write to the workflow log at all, which
+          # is why --report exists.
+          $p = Start-Process -FilePath "dist/toolshed/toolshed.exe" `
+                 -ArgumentList "--selftest","--report","$PWD/selftest.txt" `
+                 -Wait -PassThru
+          if (Test-Path selftest.txt) { Get-Content selftest.txt }
+          else { Write-Error "the windowed build produced no report"; exit 1 }
+          if ($p.ExitCode -ne 0) { Write-Error "windowed selftest exit $($p.ExitCode)"; exit 1 }
+
+      - name: Portable zip
+        id: zip
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $name = "toolshed-$v-windows-x64"
+          New-Item -ItemType Directory -Force "stage/$name" | Out-Null
+          Copy-Item dist/toolshed/* "stage/$name" -Recurse
+          Copy-Item LICENSE,NOTICE,README.md "stage/$name"
+          New-Item -ItemType Directory -Force out | Out-Null
+          & 7z a -tzip -mx=7 "out/$name.zip" "./stage/$name" | Out-Null
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Inno Setup
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            # Preinstalled on windows-2025 but not on PATH. Locate it rather
+            # than assuming, so a runner image change fails loudly.
+            $iscc = (Get-ChildItem "C:\Program Files*" -Recurse -Filter ISCC.exe `
+                     -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $iscc) { Write-Error "ISCC.exe not found on this runner"; exit 1 }
+          & $iscc /Qp `
+            "/DMyAppVersion=${{ steps.ver.outputs.version }}" `
+            "/DMySourceDir=$PWD\dist\toolshed" `
+            "/DMyRepoRoot=$PWD" `
+            "/O$PWD\out" `
+            packaging\windows\toolshed.iss
+          if ($LASTEXITCODE -ne 0) { Write-Error "ISCC failed"; exit 1 }
+          Get-ChildItem out
+
+      - name: The installer must install, run and uninstall
+        run: |
+          $setup = (Get-ChildItem out -Filter *Setup.exe).FullName
+          # /VERYSILENT proves the per-user, no-UAC path works unattended.
+          Start-Process $setup -ArgumentList `
+            "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/LOG=$PWD\inno.log" -Wait
+          $app = "$env:LOCALAPPDATA\Programs\Toolshed\toolshed-console.exe"
+          if (-not (Test-Path $app)) { Write-Error "not installed to $app"; exit 1 }
+          $env:QT_QPA_PLATFORM = "offscreen"
+          & $app --selftest
+          if ($LASTEXITCODE -ne 0) { Write-Error "installed build failed selftest"; exit 1 }
+          Remove-Item env:QT_QPA_PLATFORM
+          # The uninstall entry must be under HKCU. Under HKLM it would mean the
+          # install went per-machine, which PrivilegesRequired=lowest forbids.
+          $k = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
+               Where-Object { $_.GetValue("DisplayName") -like "Toolshed*" }
+          if (-not $k) { Write-Error "no HKCU uninstall entry was written"; exit 1 }
+          $u = $k.GetValue("QuietUninstallString")
+          if (-not $u) { $u = $k.GetValue("UninstallString") }
+          Start-Process $u.Split('"')[1] `
+            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
+          Write-Host "install / run / uninstall verified"
+
+      - name: Checksums
+        run: |
+          Get-ChildItem out -Include *.exe,*.zip -Recurse | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)" | Out-File -Append -Encoding ascii out/SHA256SUMS.txt
+          }
+          Get-Content out/SHA256SUMS.txt
+
+      - name: Upload the portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.zip.outputs.name }}
+          path: out/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: toolshed-windows-installer
+          path: |
+            out/*Setup.exe
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload PyInstaller diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-pyinstaller-logs
+          path: |
+            build/toolshed/warn-toolshed.txt
+            build/toolshed/xref-toolshed.html
+            inno.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dl
+          merge-multiple: true
+      - name: Attach to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            || gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+                 --title "Toolshed ${GITHUB_REF_NAME}" --draft --notes "Unsigned build."
+          gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --clobber dl/*Setup.exe dl/*.zip dl/SHA256SUMS.txt

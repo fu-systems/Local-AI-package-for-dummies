@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Toolshed
+GenericName=Local AI setup
+Comment=Set up local AI for pictures, video, music and 3D models
+Exec=toolshed
+Icon=toolshed
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=AI;image;video;audio;3D;
+StartupWMClass=toolshed

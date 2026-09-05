@@ -1,6 +1,8 @@
 [project]
 name = "toolshed"
-version = "0.0.1"
+# Read from toolshed/__init__.py so the wheel, --version, artifact names,
+# the Inno Setup AppVersion and the Windows VERSIONINFO cannot drift apart.
+dynamic = ["version"]
 description = "Local AI, set up for you. A hand-holding installer for ComfyUI on Linux and Windows."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -17,8 +19,12 @@ dependencies = [
     "psutil>=6.0",
     "keyring>=25.0",
     "cryptography>=44.0",       # ed25519 catalogue verification
-    "huggingface-hub>=1.30",    # METADATA ONLY -- never used for transfers
 ]
+# Deliberately NOT a dependency: huggingface-hub. docs/PLAN.md uses it for
+# metadata only -- two REST calls httpx already covers -- but its public API is
+# lazy __getattr__-based, so PyInstaller's module graph sees nothing and it has
+# no hook. It also drags in the compiled hf_xet plus fsspec, tqdm and filelock.
+# Adding it back means owning a collect_submodules + copy_metadata hook.
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.8", "mypy>=1.13"]
@@ -30,6 +36,9 @@ toolshed = "toolshed.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "toolshed/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["toolshed"]
 
@@ -39,6 +48,19 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# PyInstaller spec files are Python and would otherwise go unlinted.
+extend-include = ["*.spec"]
+extend-exclude = [".cache", "build", "dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["toolshed"]
+
+[tool.ruff.lint.per-file-ignores]
+# Spec files use globals PyInstaller injects at exec time: SPECPATH, Analysis,
+# Tree, PYZ, EXE, COLLECT. Ruff cannot see them and reports every one as F821.
+# E402: the shared-config import must follow the sys.path insert that makes it
+# resolvable, because a spec is exec'd, not imported.
+"*.spec" = ["F821", "E402"]
