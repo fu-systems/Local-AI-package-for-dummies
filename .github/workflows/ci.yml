@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: python -m pip install pytest ruff pyyaml
+      - name: Lint
+        run: ruff check tools tests toolshed
+      - name: Unit tests
+        run: python -m pytest tests/unit -q
+
+  gpl-boundary:
+    # ComfyUI is GPL-3.0-or-later. Toolshed downloads and drives it as a separate
+    # process and must never import or bundle it. See CONTRIBUTING.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No ComfyUI imports
+        run: |
+          if grep -rnE '^\s*(from|import)\s+(comfy|nodes|folder_paths)\b' \
+               --include='*.py' toolshed/ 2>/dev/null; then
+            echo "::error::Toolshed must not import ComfyUI. See CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "GPL boundary intact"

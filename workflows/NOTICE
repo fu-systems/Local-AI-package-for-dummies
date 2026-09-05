@@ -1,0 +1,20 @@
+Workflow provenance
+===================
+
+Files under workflows/ are adapted from Comfy-Org/workflow_templates, which is
+MIT licensed, Copyright (c) 2023-present Comfy Org. That notice is retained
+here as MIT requires, and workflows/LICENSE carries the full text.
+
+Every workflow declares its origin in the recipe that ships it, under
+`workflows[].derived_from` as {repo, commit, template}. `tools/lint_catalog.py`
+requires that field to be present and non-null on every workflow, or to be
+explicitly `null` for a graph hand-authored from scratch.
+
+No workflow here is CC0. An MIT derivative cannot be released into the public
+domain without stripping the notice MIT obliges us to keep.
+
+Adapted from (populated as each workflow triple is authored):
+
+  workflow file                                  upstream template
+  ---------------------------------------------  ----------------------------------
+  (none yet -- see catalog/recipes/*.generated.yaml)

@@ -1,0 +1,40 @@
+# Upstream behaviours we depend on
+
+ComfyUI ships roughly one minor release a week. Every behaviour Toolshed relies
+on is recorded here with where it was verified, so a version bump is a diff
+review rather than an archaeology expedition. `.github/workflows/canary.yml`
+runs the contract and golden-graph tests against ComfyUI `master` nightly and
+opens an issue when something in this table stops being true.
+
+Verified 2026-09-05 against ComfyUI v0.34.0 unless stated otherwise.
+
+| Behaviour we rely on | Where verified | Breaks what if it changes |
+|---|---|---|
+| Workflows sidebar is a plain directory listing of `<user-directory>/default/workflows/`; no index file needed, subdirectories render as folders | `/userdata` API | Workflow injection entirely |
+| `Note` / `MarkdownNote` are frontend-only virtual nodes that never execute | frontend node defs | Beginner annotations would reach `/prompt` and fail validation |
+| Combo widgets validate against `folder_paths.get_filename_list(<key>)`, by filename, before execution | `execution.py` validation path | Golden-graph stub-file strategy (`tests/golden/`) |
+| Missing-model detection only matches **top-level** filenames in a model folder | frontend missing-models dialog | Files nested in subfolders are reported missing forever |
+| `--preview-method auto` is rewritten to `Latent2RGB` **before** the TAESD branch | `latent_preview.py::get_previewer` | Any plan to ship a TAESD decoder |
+| Latent format `taesd_decoder_name` is undefined for Z-Image, ACE-Step and all TRELLIS.2 formats | `comfy/latent_formats.py` | Live preview expectations for those modalities |
+| `--lowvram` is a no-op while DynamicVRAM is on (the 0.34.0 default); `--novram`/`--highvram` disable DynamicVRAM | `comfy/cli_args.py` help text | Low-VRAM handling; we expose `--reserve-vram` instead |
+| `--database-url` relocates the internal database, which `--base-directory` does not | `comfy/cli_args.py` | DB lands in the disposable engine tree and dies on update |
+| `--user-directory` and `--models-directory` are typed `is_valid_directory` and must pre-exist | `comfy/cli_args.py` | Install aborts with a bare argparse usage error |
+| Without `--enable-cors-header`, an origin-only middleware 403s cross-site requests; a native client sends no `Origin` and is unaffected | `server.py` middleware | Why easy mode is native Qt, not a webview |
+| Terminal condition is `executing {node: null, prompt_id}`, sent **after** history is written | `execution.py` / websocket | Generate UI would poll or hang |
+| Node outputs publish under varying keys (`images`, `audio`, `3d`, positional `result`) | `comfy_extras/nodes_save_3d.py` and friends | Output collection must never key off `"images"` |
+| `/object_info` combo entries have two shapes: V1 puts options in slot 0, V3 puts the literal `"COMBO"` there with options under `opts["options"]` | `/object_info` responses | Model dropdowns show empty on V3 nodes |
+| `VAELoader.vae_list()` synthesises TAESD names and `pixel_space` that are not files | `nodes.py` | VAE dropdown must come from `/object_info/VAELoader`, not `/models/vae` |
+| TRELLIS.2 and Pixal3D are native in core with no compiled dependencies | `comfy_extras/nodes_trellis2.py` (PR #14718, merged 2026-08-22) | The entire single-venv, no-build-tools 3D story |
+| Official templates may be **subgraph-based**: top-level node whose `type` is a UUID, real graph under `definitions.subgraphs[0]` with typed `inputs` | `Comfy-Org/workflow_templates` `image_z_image_turbo` | Parameter binding strategy; `derive_catalog.py` handles both shapes |
+| Template `properties.models[]` carries `{name, url, directory}` verbatim | any template JSON | `derive_catalog.py`, i.e. the whole catalogue |
+
+## Known upstream issues we route around
+
+- `--base-directory` does not relocate the internal database (ComfyUI #10264).
+  Worked around with `--database-url`.
+- The built-in missing-model Download button has several open 2026 regressions
+  (browser downloads landing in the OS Downloads folder, dead "Download All",
+  `Download (NaN undefined)` on Civitai). We pre-download everything and keep
+  the warning on only as a diagnostic.
+- Some template `url` values are truncated mid-filename. `derive_catalog.py`
+  repairs the path tail from the authoritative `name` field.

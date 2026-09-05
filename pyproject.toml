@@ -1,0 +1,44 @@
+[project]
+name = "toolshed"
+version = "0.0.1"
+description = "Local AI, set up for you. A hand-holding installer for ComfyUI on Linux and Windows."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { file = "LICENSE" }
+
+# Runtime dependencies of the INSTALLER APP only. ComfyUI and PyTorch are not
+# listed here on purpose: they are installed into a separate, user-owned venv at
+# install time by uv, and are never imported by this process.
+dependencies = [
+    "PySide6-Essentials>=6.9",
+    "httpx>=0.28",
+    "PyYAML>=6.0",
+    "pydantic>=2.9",
+    "psutil>=6.0",
+    "keyring>=25.0",
+    "cryptography>=44.0",       # ed25519 catalogue verification
+    "huggingface-hub>=1.30",    # METADATA ONLY -- never used for transfers
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.8", "mypy>=1.13"]
+
+[project.scripts]
+toolshed = "toolshed.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["toolshed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
