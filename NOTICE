@@ -1,0 +1,15 @@
+Toolshed
+Copyright 2026 fu-systems
+
+This product includes software developed at fu-systems.
+
+Toolshed downloads and launches ComfyUI (https://github.com/comfyanonymous/ComfyUI,
+GPL-3.0-or-later) as a separate process at install time. It does not link against,
+embed, modify, or redistribute ComfyUI source code.
+
+Workflow files under workflows/ are derived from Comfy-Org/workflow_templates
+(MIT, Copyright (c) 2023-present Comfy Org). See workflows/NOTICE for per-file
+provenance.
+
+Model weights are downloaded from their upstream publishers under their own
+licences and are never redistributed by this project. See catalog/licences/.
