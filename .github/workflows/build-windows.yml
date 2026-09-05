@@ -99,15 +99,24 @@ jobs:
 
       - name: The Visual C++ runtime must be bundled
         run: |
-          # PyInstaller collects these so the app runs on a machine with no
-          # VC++ redistributable installed. When that silently does not happen
-          # it only breaks on a clean Windows box -- that is, on a beginner's
-          # machine, never on ours.
+          # The app must carry its own C++ runtime, so it starts on a Windows
+          # machine with no VC++ redistributable. That failure would only ever
+          # appear on a beginner's PC and never on ours.
+          #
+          # -Recurse is load-bearing. These DLLs arrive from two different
+          # places: vcruntime140*.dll is collected from the CPython install and
+          # lands in _internal/, while msvcp140.dll ships inside the PySide6
+          # wheel and lands in _internal/PySide6/. A non-recursive search sees
+          # only the first pair and fails on the third -- which is exactly what
+          # it did.
           $need = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
-          $have = Get-ChildItem dist/toolshed/_internal -Filter *.dll |
-                  Select-Object -ExpandProperty Name
+          $have = Get-ChildItem dist/toolshed/_internal -Recurse -Filter *.dll |
+                  Select-Object -ExpandProperty Name -Unique
           foreach ($d in $need) {
-            if ($have -notcontains $d) { Write-Error "missing $d in the bundle"; exit 1 }
+            if ($have -notcontains $d) {
+              Write-Error "missing $d in the bundle; the app would need a VC++ redistributable"
+              exit 1
+            }
           }
           Write-Host "VC++ runtime present"
 
@@ -140,7 +149,16 @@ jobs:
           Copy-Item dist/toolshed/* "stage/$name" -Recurse
           Copy-Item LICENSE,NOTICE,README.md "stage/$name"
           New-Item -ItemType Directory -Force out | Out-Null
-          & 7z a -tzip -mx=7 "out/$name.zip" "./stage/$name" | Out-Null
+          # 7-Zip is on the current runner image, but that is an assumption
+          # about an image we do not control. Fall back rather than fail.
+          if (Get-Command 7z -ErrorAction SilentlyContinue) {
+            & 7z a -tzip -mx=7 "out/$name.zip" "./stage/$name" | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Error "7z failed"; exit 1 }
+          } else {
+            Write-Host "7z not found; using Compress-Archive"
+            Compress-Archive -Path "stage/$name" -DestinationPath "out/$name.zip" -Force
+          }
+          if (-not (Test-Path "out/$name.zip")) { Write-Error "no zip produced"; exit 1 }
           "name=$name" >> $env:GITHUB_OUTPUT
 
       - name: Inno Setup
@@ -176,13 +194,21 @@ jobs:
           Remove-Item env:QT_QPA_PLATFORM
           # The uninstall entry must be under HKCU. Under HKLM it would mean the
           # install went per-machine, which PrivilegesRequired=lowest forbids.
-          $k = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" |
+          # -ErrorAction SilentlyContinue: without it, a missing key throws a raw
+          # PowerShell error instead of the message that explains what it means.
+          $k = Get-ChildItem "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" `
+                 -ErrorAction SilentlyContinue |
                Where-Object { $_.GetValue("DisplayName") -like "Toolshed*" }
           if (-not $k) { Write-Error "no HKCU uninstall entry was written"; exit 1 }
           $u = $k.GetValue("QuietUninstallString")
           if (-not $u) { $u = $k.GetValue("UninstallString") }
-          Start-Process $u.Split('"')[1] `
-            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
+          # The value normally looks like: "C:\...\unins000.exe" /SILENT
+          # Do not assume the quotes are there -- an unquoted value would pass
+          # $null to Start-Process. (No backticks in these comments: a trailing
+          # one is a PowerShell line continuation.)
+          $exe = if ($u -match '^"([^"]+)"') { $Matches[1] } else { ($u -split ' ')[0] }
+          if (-not (Test-Path $exe)) { Write-Error "uninstaller not found at $exe"; exit 1 }
+          Start-Process $exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
           Write-Host "install / run / uninstall verified"
 
       - name: Checksums
