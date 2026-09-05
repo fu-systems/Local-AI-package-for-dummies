@@ -49,6 +49,21 @@ primary view, no jargon without a plain-English gloss, no "error 0x80070005".
 Every failure needs four things: what happened, why, what to do now, and a way
 to copy diagnostics.
 
+## Verify builds on Python 3.12, not whatever you have
+
+`pyproject.toml` requires 3.12 and CI builds on 3.12. Verifying a PyInstaller
+change on 3.11 proves less than it looks: 3.11 still has `distutils` in the
+standard library, so it never exercises the setuptools-vendored aliasing that
+3.12 depends on. A spec that builds cleanly on 3.11 can fail outright on 3.12.
+This has already cost one round of red CI.
+
+    python3.12 -m venv .venv-build && .venv-build/bin/pip install . pyinstaller
+    .venv-build/bin/pyinstaller --clean --noconfirm packaging/linux/toolshed.spec
+
+Relatedly: never put `distutils`, `setuptools`, `pkg_resources`, `pip` or
+`wheel` in a spec's `excludes`. See the comment in `packaging/_spec_common.py`;
+a unit test enforces it.
+
 ## Build environment
 
 Linux builds run in an `ubuntu:22.04` container. This is not incidental: the

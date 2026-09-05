@@ -44,11 +44,30 @@ QT_EXCLUDES = [
     "PyQt5", "PyQt6", "PySide2",
 ]
 
+# NEVER add a packaging tool here -- not distutils, setuptools, pkg_resources,
+# pip or wheel. Python 3.12 removed distutils from the standard library, so
+# setuptools vendors it and PyInstaller's hook aliases setuptools._distutils
+# onto the name `distutils`. alias_module refuses to alias onto a node that
+# already exists, and an entry here creates exactly such a node, so the build
+# dies the moment anything in the module graph reaches it:
+#
+#   ValueError: Target module "distutils" already imported as
+#               "ExcludedModule('distutils',)".
+#
+# The same is true of `wheel`, which setuptools also vendors. This cost a
+# Windows build: the keyring backend chain reaches distutils on Windows and
+# not on Linux, so only one platform failed. Excluding all five saved 2 MiB
+# out of 167 -- the Qt excludes and PySide6-Essentials are what keep the
+# bundle small, not these.
 OTHER_EXCLUDES = [
     "tkinter", "test", "lib2to3", "pydoc_data", "idlelib",
-    "distutils", "setuptools", "pip", "wheel", "pkg_resources",
     "numpy", "PIL", "matplotlib", "IPython", "pytest", "_pytest",
 ]
+
+# Guarded by tests/unit/test_repo_layout.py so this cannot regress quietly.
+FORBIDDEN_EXCLUDES = frozenset({
+    "distutils", "setuptools", "pkg_resources", "pip", "wheel", "_distutils_hack",
+})
 
 # Never Tree(repo_root): .cache/ holds fetched upstream templates and whatever a
 # developer left there. Enumerate the trees we actually want.

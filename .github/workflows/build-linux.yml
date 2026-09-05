@@ -37,6 +37,12 @@ env:
   # catch a regression that pulls in QtWebEngine or numpy, which would roughly
   # double it, not to be tight.
   SIZE_BUDGET_MIB: "400"
+  # The libraries a user must have installed to run the built binary. Verified:
+  # this is exactly the set verify-clean-2204 passes with. PyInstaller cannot
+  # bundle libEGL or libGL -- they are driver-coupled and correctly treated as
+  # system libraries -- so they stay real runtime dependencies.
+  # Keep in sync with README.md and packaging/linux/install.sh.
+  RUNTIME_DEPS: "libgl1 libegl1 libglib2.0-0 libxkbcommon0 libxcb-cursor0"
 
 jobs:
   build:
@@ -122,6 +128,10 @@ jobs:
           set -eux
           /opt/buildvenv/bin/pyinstaller --clean --noconfirm --log-level=INFO \
             packaging/linux/toolshed.spec
+          test -x dist/toolshed/toolshed || {
+            echo "::error::PyInstaller produced no executable at dist/toolshed/toolshed."
+            echo "::error::The real error is above this line, not in the size check."
+            exit 1; }
           du -sh dist/toolshed
           SZ=$(du -sm dist/toolshed | cut -f1)
           echo "bundle ${SZ} MiB (budget ${SIZE_BUDGET_MIB} MiB)"
@@ -181,9 +191,10 @@ jobs:
           # When PyInstaller exits 0 and the binary is broken, the answer is
           # almost always in warn-toolshed.txt.
           name: linux-pyinstaller-logs
-          path: |
-            build/toolshed/warn-toolshed.txt
-            build/toolshed/xref-toolshed.html
+          # build/** rather than build/toolshed/*: when PyInstaller dies
+          # during analysis the report directory never exists, and the run that
+          # most needs diagnostics uploads nothing.
+          path: build/**
           if-no-files-found: warn
           retention-days: 7
 
@@ -202,8 +213,8 @@ jobs:
           set -eux
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y --no-install-recommends \
-            xz-utils libgl1 libegl1 libglib2.0-0 libxkbcommon0 libxcb-cursor0 xvfb
+          # shellcheck disable=SC2086 -- word splitting is intended here
+          apt-get install -y --no-install-recommends xz-utils xvfb $RUNTIME_DEPS
       - uses: actions/download-artifact@v7
         with:
           pattern: toolshed-*-linux-x86_64
@@ -232,7 +243,9 @@ jobs:
       - run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxcb-cursor0 xvfb
+          # The same RUNTIME_DEPS as the 22.04 job. Installing a shorter list
+          # here is what broke this job: the binary needs libEGL to import Qt.
+          sudo apt-get install -y --no-install-recommends xvfb $RUNTIME_DEPS
           mkdir -p /tmp/t && tar -xJf dl/*.tar.xz -C /tmp/t
           D=$(find /tmp/t -maxdepth 1 -mindepth 1 -type d)
           xvfb-run -a "$D/toolshed" --selftest

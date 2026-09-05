@@ -80,6 +80,17 @@ jobs:
       - name: PyInstaller
         run: |
           pyinstaller --clean --noconfirm --log-level=INFO packaging/windows/toolshed.spec
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "PyInstaller failed with exit code $LASTEXITCODE. The real error is above."
+            exit 1
+          }
+          # Fail at the real failure. Previously a PyInstaller crash surfaced as
+          # "bundle 0 MiB", which reads like a size-gate problem and is not.
+          foreach ($exe in @("toolshed.exe", "toolshed-console.exe")) {
+            if (-not (Test-Path "dist/toolshed/$exe")) {
+              Write-Error "PyInstaller produced no dist/toolshed/$exe"; exit 1
+            }
+          }
           $mb = [math]::Round((Get-ChildItem dist/toolshed -Recurse | Measure-Object Length -Sum).Sum / 1MB)
           Write-Host "bundle $mb MiB (budget $env:SIZE_BUDGET_MIB MiB)"
           if ($mb -gt [int]$env:SIZE_BUDGET_MIB) {
@@ -205,9 +216,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-pyinstaller-logs
+          # build/** rather than build/toolshed/*: when PyInstaller dies
+          # during analysis the report directory never exists, and the run that
+          # most needs diagnostics uploads nothing.
           path: |
-            build/toolshed/warn-toolshed.txt
-            build/toolshed/xref-toolshed.html
+            build/**
             inno.log
           if-no-files-found: warn
           retention-days: 7
