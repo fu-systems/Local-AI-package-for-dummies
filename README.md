@@ -47,6 +47,18 @@ cannot do **before** it downloads anything.
 
 macOS is out of scope.
 
+### Linux system libraries
+
+Toolshed bundles its own Python and Qt, but a few graphics libraries are
+driver-coupled and must come from your distribution:
+
+    Ubuntu / Debian   sudo apt install libgl1 libegl1 libglib2.0-0 libxkbcommon0 libxcb-cursor0
+    Fedora            sudo dnf install mesa-libGL mesa-libEGL glib2 libxkbcommon xcb-util-cursor
+    Arch              sudo pacman -S libglvnd glib2 libxkbcommon xcb-util-cursor
+
+`install.sh` checks for these and tells you what is missing. Ubuntu 22.04 is the
+oldest supported release.
+
 ## How it relates to ComfyUI
 
 Toolshed downloads [ComfyUI](https://github.com/comfyanonymous/ComfyUI) from

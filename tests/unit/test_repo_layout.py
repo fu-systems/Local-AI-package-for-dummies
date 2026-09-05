@@ -91,3 +91,26 @@ def test_data_dirs_bundled_by_the_specs_exist_and_are_populated():
         assert directory.is_dir(), f"{name}/ is bundled by the specs but does not exist"
         files = [f for f in directory.rglob("*") if f.is_file()]
         assert files, f"{name}/ is empty; the bundle would ship nothing"
+
+
+def test_excludes_contain_no_setuptools_alias_targets():
+    """PyInstaller aliases setuptools' vendored copies onto their bare names on
+    Python 3.12+, and `alias_module` raises if the name is already an excluded
+    node. Putting any packaging tool in `excludes` therefore breaks the build
+    the moment the module graph reaches it -- which happened on Windows and not
+    on Linux, so it cost a full CI round to find.
+
+    This test fails at the point the mistake is made, rather than eleven
+    minutes into a Windows build.
+    """
+    import sys
+
+    sys.path.insert(0, str(REPO / "packaging"))
+    from _spec_common import FORBIDDEN_EXCLUDES, OTHER_EXCLUDES, QT_EXCLUDES
+
+    offenders = FORBIDDEN_EXCLUDES.intersection(OTHER_EXCLUDES + QT_EXCLUDES)
+    assert not offenders, (
+        f"{sorted(offenders)} must not be excluded: PyInstaller aliases the "
+        f"setuptools-vendored copies onto these names and the build dies with "
+        f'ValueError: Target module "..." already imported as ExcludedModule'
+    )
