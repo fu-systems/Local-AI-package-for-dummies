@@ -1,0 +1,262 @@
+name: build-linux
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    # Catalogue and documentation changes will be most pull requests and must
+    # not cost twenty minutes each. Pushes to main are unfiltered, so main
+    # always has a known-good artifact.
+    paths:
+      - "toolshed/**"
+      - "packaging/**"
+      - "pyproject.toml"
+      - ".github/workflows/build-linux.yml"
+  workflow_dispatch:
+  schedule:
+    # Upstream PySide6 or PyInstaller releases break builds. Find out on a
+    # Monday morning, not on release day.
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a tag build.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Pinned deliberately, separately from the loose >= in pyproject.toml. A
+  # PySide6 minor release routinely lands before PyInstaller supports it; the
+  # weekly scheduled run is what tells us when it is safe to move these.
+  PYSIDE6_VERSION: "6.11.2"
+  PYINSTALLER_VERSION: "6.22.2"
+  # dist/toolshed measured 148 MiB when this was written. The budget exists to
+  # catch a regression that pulls in QtWebEngine or numpy, which would roughly
+  # double it, not to be tight.
+  SIZE_BUDGET_MIB: "400"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # The PySide6-Essentials wheel is manylinux_2_34, so glibc 2.34 is our
+    # floor. ubuntu-latest is 24.04 with glibc 2.39: building there produces a
+    # binary that dies on Ubuntu 22.04 before our code runs a single line.
+    #
+    # A container rather than `runs-on: ubuntu-22.04` because the container is
+    # version controlled and reproducible, is unaffected by GitHub retiring
+    # runner labels, and is a one-line change when the floor moves.
+    container:
+      image: ubuntu:22.04
+      options: --user root
+    steps:
+      - name: Bootstrap the container
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          # ca-certificates and git first: without them checkout falls back to
+          # a tarball download and every later HTTPS fetch fails confusingly.
+          apt-get install -y --no-install-recommends \
+            ca-certificates git curl gnupg software-properties-common \
+            xz-utils tar file binutils
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update
+          # python3.12-dev is REQUIRED, not optional: it ships
+          # libpython3.12.so.1.0, without which PyInstaller cannot build.
+          apt-get install -y --no-install-recommends \
+            python3.12 python3.12-dev python3.12-venv
+          # Libraries PySide6 needs merely to be imported, even headless.
+          apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libglib2.0-0 libdbus-1-3 libxkbcommon0 \
+            libfontconfig1 libfreetype6
+          # The xcb stack. These must be present AT BUILD TIME, not just at
+          # run time: PyInstaller bundles the xcb helper libraries it can
+          # resolve, so anything missing here becomes a library the end user
+          # has to install themselves.
+          apt-get install -y --no-install-recommends \
+            xvfb libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1 libxcb-util1 libsm6 libice6
+          ldd --version | head -1
+          test -f /usr/lib/x86_64-linux-gnu/libpython3.12.so.1.0
+
+      # setup-python is NOT usable inside a 22.04 container on a 24.04 host
+      # (glibc mismatch, actions/setup-python#1224), hence deadsnakes above.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install the app and build tools
+        run: |
+          set -eux
+          python3.12 -m venv /opt/buildvenv
+          /opt/buildvenv/bin/python -m pip install --upgrade pip
+          # `pip install .`, never `-e .`. Hatchling's editable install writes a
+          # .pth registering a MetaPathFinder, and PyInstaller's module graph
+          # does not execute .pth finders: it reports toolshed as missing, or
+          # collects a tree that diverges from the wheel.
+          /opt/buildvenv/bin/pip install .
+          /opt/buildvenv/bin/pip install \
+            "PySide6-Essentials==${PYSIDE6_VERSION}" \
+            "pyinstaller==${PYINSTALLER_VERSION}"
+          /opt/buildvenv/bin/python -c "import toolshed, PySide6; print(toolshed.__version__, PySide6.__version__)"
+
+      - name: Resolve the version
+        id: ver
+        run: |
+          set -eux
+          V=$(/opt/buildvenv/bin/python -c "import toolshed; print(toolshed.__version__)")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          # A tag build whose version disagrees with the tag is a mis-release.
+          # Fail here rather than after it is published.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$V" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match toolshed.__version__ v$V"
+            exit 1
+          fi
+
+      - name: PyInstaller
+        run: |
+          set -eux
+          /opt/buildvenv/bin/pyinstaller --clean --noconfirm --log-level=INFO \
+            packaging/linux/toolshed.spec
+          du -sh dist/toolshed
+          SZ=$(du -sm dist/toolshed | cut -f1)
+          echo "bundle ${SZ} MiB (budget ${SIZE_BUDGET_MIB} MiB)"
+          [ "$SZ" -le "$SIZE_BUDGET_MIB" ] || {
+            echo "::error::bundle ${SZ} MiB exceeds the ${SIZE_BUDGET_MIB} MiB budget"; exit 1; }
+
+      - name: Smoke test — offscreen
+        run: |
+          set -eux
+          ./dist/toolshed/toolshed --diagnostics
+          QT_QPA_PLATFORM=offscreen ./dist/toolshed/toolshed --selftest
+
+      - name: Smoke test — Xvfb with the real xcb plugin
+        run: |
+          set -eux
+          # This is the one that matters. The offscreen platform never loads
+          # libqxcb.so, so an offscreen-only test cannot catch the single most
+          # common Qt-on-Linux failure.
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            ./dist/toolshed/toolshed --selftest \
+            || { QT_DEBUG_PLUGINS=1 xvfb-run -a ./dist/toolshed/toolshed --selftest; exit 1; }
+
+      - name: Package
+        id: pkg
+        run: |
+          set -eux
+          V="${{ steps.ver.outputs.version }}"
+          NAME="toolshed-${V}-linux-x86_64"
+          mkdir -p "stage/${NAME}" out
+          cp -a dist/toolshed/. "stage/${NAME}/"
+          cp packaging/linux/install.sh packaging/linux/uninstall.sh \
+             packaging/linux/toolshed.desktop packaging/linux/toolshed.png "stage/${NAME}/"
+          cp LICENSE NOTICE README.md "stage/${NAME}/"
+          chmod +x "stage/${NAME}/install.sh" "stage/${NAME}/uninstall.sh" "stage/${NAME}/toolshed"
+          # .tar.xz, NOT .tar.zst: GNU tar shells out to a separate zstd binary
+          # that minimal Ubuntu and Debian installs do not have, and that
+          # failure lands before the application has run a single line.
+          tar -C stage -cf - "${NAME}" | xz -T0 -9 -c > "out/${NAME}.tar.xz"
+          ( cd out && sha256sum "${NAME}.tar.xz" > "${NAME}.tar.xz.sha256" )
+          ls -lh out
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            out/*.tar.xz
+            out/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload PyInstaller diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          # When PyInstaller exits 0 and the binary is broken, the answer is
+          # almost always in warn-toolshed.txt.
+          name: linux-pyinstaller-logs
+          path: |
+            build/toolshed/warn-toolshed.txt
+            build/toolshed/xref-toolshed.html
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Prove the documented runtime dependency list is complete. This job installs
+  # ONLY what docs say a user needs, so it fails the day someone adds a library
+  # we forgot to write down.
+  verify-clean-2204:
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+      options: --user root
+    steps:
+      - name: Install only the documented dependencies
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            xz-utils libgl1 libegl1 libglib2.0-0 libxkbcommon0 libxcb-cursor0 xvfb
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: toolshed-*-linux-x86_64
+          merge-multiple: true
+          path: dl
+      - name: Extract with plain tar and run
+        run: |
+          set -eux
+          mkdir -p /tmp/t
+          # No --zstd, no helper binary: exactly what a user types.
+          tar -xJf dl/*.tar.xz -C /tmp/t
+          D=$(find /tmp/t -maxdepth 1 -mindepth 1 -type d)
+          "$D/toolshed" --diagnostics
+          xvfb-run -a "$D/toolshed" --selftest
+
+  # Built on 22.04, must also run on 24.04.
+  verify-forward-2404:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: toolshed-*-linux-x86_64
+          merge-multiple: true
+          path: dl
+      - run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxcb-cursor0 xvfb
+          mkdir -p /tmp/t && tar -xJf dl/*.tar.xz -C /tmp/t
+          D=$(find /tmp/t -maxdepth 1 -mindepth 1 -type d)
+          xvfb-run -a "$D/toolshed" --selftest
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, verify-clean-2204, verify-forward-2404]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dl
+          merge-multiple: true
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          # Draft on purpose: an unsigned build should not go public the
+          # instant a tag lands.
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            || gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+                 --title "Toolshed ${GITHUB_REF_NAME}" --draft --notes "Unsigned build."
+          gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --clobber dl/*.tar.xz dl/*.sha256
