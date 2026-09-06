@@ -14,6 +14,12 @@ license = { file = "LICENSE" }
 dependencies = [
     "PySide6-Essentials>=6.9",
     "httpx>=0.28",
+    # Easy mode's progress bar. ComfyUI reports per-node progress only over its
+    # /ws endpoint -- there is no HTTP equivalent -- and PySide6-Essentials
+    # does not ship QtWebSockets (checked: the wheel has QtNetwork but no
+    # QtWebSockets), so a websocket client has to come from somewhere. Pure
+    # Python, no PyInstaller hook needed.
+    "websockets>=13",
     "PyYAML>=6.0",
     "pydantic>=2.9",
     "psutil>=6.0",

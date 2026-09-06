@@ -42,8 +42,13 @@ AMD_ON_WINDOWS = HardwareReport(os="windows", gpus=(Gpu(vendor="amd", vram_mb=20
 
 
 class TestThereIsAlwaysAWayForward:
-    def test_supported_hardware_has_all_four_pages(self, qapp):
-        assert window_for(AMD_20G).pages.count() == 4
+    def test_supported_hardware_has_every_page(self, qapp):
+        """Verdict, choose, confirm, install, launch, make. The last two turn a
+        finished install into a running ComfyUI and then into a picture."""
+        w = window_for(AMD_20G)
+        assert w.pages.count() == 6
+        assert w.launch_page is not None
+        assert w.make_page is not None
 
     def test_the_first_page_offers_a_next_step(self, qapp):
         """The bug that prompted all of this: a verdict and no exit."""
@@ -69,7 +74,7 @@ class TestThereIsAlwaysAWayForward:
     def test_there_is_an_install_page_to_go_to(self, qapp):
         w = window_for(AMD_20G)
         assert w.install_page is not None
-        assert w.pages.count() == 4
+        assert w.pages.indexOf(w.install_page) >= 0
 
 
 class TestUnsupportedHardwareStops:
@@ -181,3 +186,92 @@ class TestAFailedInstallIsNotADeadEnd:
         assert "stale" not in window.install_page._rows, "the previous attempt was left on screen"
         assert not window._failed
         assert rows_before == 0
+
+
+class TestTheInstallEndsWithSomethingToOpen:
+    """"okay it installed but then nothing."
+
+    The install finished, set the button to Close, and told the user to open
+    ComfyUI -- a program it had just put in a folder they did not choose, with
+    no shortcut, no address and no button. The last screen now starts it.
+    """
+
+    def _installed(self, monkeypatch, tmp_path):
+        """Make default_data_root() point at a root that looks installed."""
+        from toolshed.exec.engine import Layout
+
+        layout = Layout(tmp_path)
+        layout.engine_dir.mkdir(parents=True)
+        layout.main_py.write_text("# engine")
+        layout.models_dir.mkdir(parents=True)
+        layout.python.parent.mkdir(parents=True)
+        layout.python.write_text("# python")
+        import toolshed.ui.app as app_module
+        monkeypatch.setattr(app_module, "default_data_root", lambda: tmp_path)
+        return tmp_path
+
+    def test_finishing_lands_on_a_page_that_can_open_comfyui(self, qapp, monkeypatch,
+                                                             tmp_path):
+        self._installed(monkeypatch, tmp_path)
+        w = window_for(AMD_20G)
+        w._on_install_done()
+        assert w.pages.currentWidget() is w.launch_page
+        assert w.launch_page.open_button.isEnabled()
+        assert w.launch_page.open_button.text() == "Open ComfyUI"
+
+    def test_the_page_says_where_the_workflows_are(self, qapp, monkeypatch, tmp_path):
+        """A beginner who has never seen ComfyUI needs telling where to look."""
+        self._installed(monkeypatch, tmp_path)
+        w = window_for(AMD_20G)
+        assert "Toolshed" in w.launch_page.blurb.text()
+        assert "Workflows sidebar" in w.launch_page.blurb.text()
+
+    def test_a_later_run_starts_on_the_launch_page(self, qapp, monkeypatch, tmp_path):
+        """Once it is installed, the thing you want is to open it -- not to be
+        walked through installing it again."""
+        self._installed(monkeypatch, tmp_path)
+        w = window_for(AMD_20G)
+        assert w.pages.currentWidget() is w.launch_page
+
+    def test_a_fresh_machine_still_starts_at_the_verdict(self, qapp, monkeypatch, tmp_path):
+        import toolshed.ui.app as app_module
+        monkeypatch.setattr(app_module, "default_data_root", lambda: tmp_path / "nothing")
+        w = window_for(AMD_20G)
+        assert w.pages.currentWidget() is w.verdict_page
+
+    def test_nothing_installed_disables_the_button_with_a_reason(self, qapp, monkeypatch,
+                                                                 tmp_path):
+        import toolshed.ui.app as app_module
+        monkeypatch.setattr(app_module, "default_data_root", lambda: tmp_path / "nothing")
+        w = window_for(AMD_20G)
+        assert not w.launch_page.open_button.isEnabled()
+        assert "Not installed yet" in w.launch_page.status.text()
+
+    def test_there_is_a_way_back_to_add_more_packs(self, qapp, monkeypatch, tmp_path):
+        """The launch page must not be a one-way door either."""
+        self._installed(monkeypatch, tmp_path)
+        w = window_for(AMD_20G)
+        w.launch_page.want_more_packs.emit()
+        assert w.pages.currentWidget() is w.choose_page
+
+    def test_closing_the_window_stops_a_running_engine(self, qapp, monkeypatch, tmp_path):
+        """It holds the graphics card and the port, and a user who closed
+        Toolshed has no way left to stop it short of the task manager."""
+        self._installed(monkeypatch, tmp_path)
+        w = window_for(AMD_20G)
+        stopped = []
+        monkeypatch.setattr(type(w.launch_page), "is_running", property(lambda _s: True))
+        monkeypatch.setattr(type(w.launch_page), "stop_engine",
+                            lambda _s: stopped.append(True))
+        w.close()
+        assert stopped, "the engine was left running after the window closed"
+
+    def test_the_launch_page_has_no_misleading_back_button(self, qapp, monkeypatch,
+                                                           tmp_path):
+        """The page behind it is the install log. Back would strand the user
+        on a finished progress bar with no way onward."""
+        self._installed(monkeypatch, tmp_path)
+        w = window_for(AMD_20G)
+        w.show()
+        assert not w.back_button.isVisible()
+        assert w.launch_page.more_button.isVisible()

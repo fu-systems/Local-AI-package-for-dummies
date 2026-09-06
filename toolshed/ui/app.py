@@ -14,10 +14,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from toolshed import APP_NAME, __version__
 from toolshed.catalog.packs import load_packs
 from toolshed.desktop import desktop_file_installed
+from toolshed.exec.engine import Layout
 from toolshed.hw import HardwareReport, Verdict, detect, verdict_for
 from toolshed.planner import build_plan
 from toolshed.ui.choose import ChoosePage
 from toolshed.ui.install import InstallPage
+from toolshed.ui.launch import LaunchPage
+from toolshed.ui.make import MakePage
 from toolshed.ui.ready import ReadyPage, default_data_root
 
 _YES = "✓"   # check mark
@@ -138,6 +141,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.choose_page: ChoosePage | None = None
         self.ready_page: ReadyPage | None = None
         self.install_page: InstallPage | None = None
+        self.launch_page: LaunchPage | None = None
+        self.make_page: MakePage | None = None
         if verdict.supported:
             self.choose_page = ChoosePage(load_packs(), report)
             self.choose_page.selection_changed.connect(self._sync_nav)
@@ -145,9 +150,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.install_page = InstallPage()
             self.install_page.done.connect(self._on_install_done)
             self.install_page.failed.connect(self._on_install_failed)
+            self.launch_page = LaunchPage(default_data_root())
+            self.launch_page.want_more_packs.connect(self._go_choose_packs)
+            self.make_page = MakePage(default_data_root())
+            self.launch_page.want_easy_mode.connect(self._go_easy_mode)
+            self.launch_page.engine_ready.connect(self._on_engine_ready)
+            self.launch_page.engine_stopped.connect(
+                lambda: self.make_page.set_engine(None))
             self.pages.addWidget(self.choose_page)
             self.pages.addWidget(self.ready_page)
             self.pages.addWidget(self.install_page)
+            self.pages.addWidget(self.launch_page)
+            self.pages.addWidget(self.make_page)
 
         self.back_button = QtWidgets.QPushButton("Back")
         self.back_button.clicked.connect(self._go_back)
@@ -176,6 +190,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._installing = False
         self._finished = False
         self._failed = False
+
+        # Someone who has already installed wants to open ComfyUI, not to be
+        # walked through installing it a second time. Skip straight there.
+        self._already_installed = (
+            verdict.supported and not Layout(default_data_root()).missing_pieces())
+        if self._already_installed and self.launch_page:
+            self.pages.setCurrentWidget(self.launch_page)
+
         self.statusBar().showMessage(
             "Nothing you make is sent anywhere." if verdict.supported
             else "Nothing has been downloaded or installed."
@@ -221,13 +243,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.install_page.start(plan)
 
     def _on_install_done(self) -> None:
+        """Hand the user a working ComfyUI, not a sentence about one.
+
+        This used to set the button to Close and tell them to "open ComfyUI"
+        -- a program they had just installed to a folder they did not choose,
+        with no shortcut and no address. That is where "it installed but then
+        nothing" came from.
+        """
         self._installing = False
-        self.install_page.heading.setText("Ready. Let's make something.")
-        self.install_page.current.setText(
-            "Everything is set up. Open ComfyUI and your workflows are waiting under "
-            "\"Toolshed\" in the Workflows sidebar.")
-        self.next_button.setText("Close")
         self._finished = True
+        self.launch_page.refresh()
+        self.pages.setCurrentWidget(self.launch_page)
+        self.back_button.setVisible(False)
+        self.next_button.setText("Close")
 
     def _on_install_failed(self, message: str, reason_key: str) -> None:
         """A failure is a place to carry on from, not a dead end.
@@ -265,13 +293,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.back_button.setText("Back")
         self._start_install()
 
+    def _on_engine_ready(self, url: str) -> None:
+        """Easy mode can only work once something is there to do the work."""
+        from toolshed.exec.comfy_api import ComfyClient
+        from toolshed.exec.manifest import Manifest
+
+        installed = Manifest.load(default_data_root()).packs
+        self.make_page.set_packs(list(installed))
+        self.make_page.set_engine(ComfyClient(base_url=url))
+
+    def _go_easy_mode(self) -> None:
+        self.pages.setCurrentWidget(self.make_page)
+        self._sync_nav()
+
+    def _go_choose_packs(self) -> None:
+        """From the launch screen back into the wizard, to add a pack."""
+        self._finished = False
+        self.pages.setCurrentWidget(self.choose_page)
+        self._sync_nav()
+
     def _go_back(self) -> None:
         if self._failed:
             self.close()
             return
+        if self.pages.currentWidget() is self.make_page:
+            self.pages.setCurrentWidget(self.launch_page)
+            self._sync_nav()
+            return
         if self.pages.currentIndex() > 0:
             self.pages.setCurrentIndex(self.pages.currentIndex() - 1)
             self._sync_nav()
+
+    def closeEvent(self, event) -> None:      # noqa: N802 -- Qt naming
+        """Never leave a ComfyUI running after the window that started it.
+
+        It holds the graphics card and the port, and a user who closed Toolshed
+        has no way left to stop it short of the task manager.
+        """
+        if self.launch_page and self.launch_page.is_running:
+            self.launch_page.stop_engine()
+        super().closeEvent(event)
 
     def _sync_nav(self) -> None:
         index = self.pages.currentIndex()
@@ -293,6 +354,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._finished:
             self.next_button.setText("Close")
             self.next_button.setEnabled(True)
+            return
+        if self.pages.currentWidget() is self.make_page:
+            self.back_button.setVisible(True)
+            self.back_button.setText("Back")
+            self.next_button.setText("Close")
+            self.next_button.setEnabled(True)
+            self._finished = True
+            return
+        if self.pages.currentWidget() is self.launch_page:
+            # The launch page carries its own buttons; the wizard's primary
+            # action there is simply to leave. Back is hidden because the page
+            # behind it is the install log, which is not a place to return to
+            # -- "Set up more" on the page itself is the way back into setup.
+            self.back_button.setVisible(False)
+            self.next_button.setText("Close")
+            self.next_button.setEnabled(True)
+            self._finished = True
             return
         if self.pages.currentWidget() is self.ready_page:
             self.next_button.setText("Set it up")
