@@ -7,7 +7,9 @@ call never pays for Qt and never fails because a platform plugin is missing.
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -16,6 +18,24 @@ from toolshed.hw import HardwareReport, Verdict, detect, verdict_for
 
 _YES = "✓"   # check mark
 _NO = "✗"    # ballot x
+
+
+def _desktop_file_installed(name: str) -> bool:
+    """True if <name>.desktop exists in any XDG application directory.
+
+    Follows the XDG base directory spec: $XDG_DATA_HOME (default
+    ~/.local/share) then each entry of $XDG_DATA_DIRS (default
+    /usr/local/share:/usr/share).
+    """
+    if sys.platform != "linux":
+        return True  # only the XDG portal cares; other platforms are unaffected
+
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    data_dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    for base in [data_home, *data_dirs.split(":")]:
+        if base and Path(base, "applications", f"{name}.desktop").is_file():
+            return True
+    return False
 
 
 class VerdictPage(QtWidgets.QWidget):
@@ -125,7 +145,19 @@ def build_application(
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)
     app.setOrganizationName("fu.systems")
-    QtGui.QGuiApplication.setDesktopFileName("toolshed")
+    # Only claim a desktop file we actually installed. Qt registers the name
+    # with the XDG portal, and when no matching .desktop exists -- which is the
+    # normal case for the portable tarball, before install.sh has run -- the
+    # portal answers with a confusing error on stderr:
+    #
+    #   qt.qpa.services: Failed to register with host portal
+    #   QDBusError(... "Could not register app ID: App info not found for 'toolshed'")
+    #
+    # Nothing is broken when that happens, but a beginner running from a
+    # terminal should not be shown a DBus error for a feature they did not ask
+    # for. Set the name when the file is there, stay quiet when it is not.
+    if _desktop_file_installed("toolshed"):
+        QtGui.QGuiApplication.setDesktopFileName("toolshed")
 
     report = detect()
     window = MainWindow(report, verdict_for(report))
