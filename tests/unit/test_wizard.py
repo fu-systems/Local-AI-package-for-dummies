@@ -42,8 +42,8 @@ AMD_ON_WINDOWS = HardwareReport(os="windows", gpus=(Gpu(vendor="amd", vram_mb=20
 
 
 class TestThereIsAlwaysAWayForward:
-    def test_supported_hardware_has_three_pages(self, qapp):
-        assert window_for(AMD_20G).pages.count() == 3
+    def test_supported_hardware_has_all_four_pages(self, qapp):
+        assert window_for(AMD_20G).pages.count() == 4
 
     def test_the_first_page_offers_a_next_step(self, qapp):
         """The bug that prompted all of this: a verdict and no exit."""
@@ -59,14 +59,17 @@ class TestThereIsAlwaysAWayForward:
         w._go_back()
         assert w.pages.currentIndex() == 0
 
-    def test_the_last_page_does_not_pretend_setup_exists(self, qapp):
-        """A button labelled 'Set it up' that does nothing is how software
-        earns distrust. It says so instead, and stays disabled."""
+    def test_the_last_page_offers_to_actually_install(self, qapp):
         w = window_for(AMD_20G)
         w._go_next()
         w._go_next()
-        assert "not built yet" in w.next_button.text()
-        assert not w.next_button.isEnabled()
+        assert w.next_button.text() == "Set it up"
+        assert w.next_button.isEnabled()
+
+    def test_there_is_an_install_page_to_go_to(self, qapp):
+        w = window_for(AMD_20G)
+        assert w.install_page is not None
+        assert w.pages.count() == 4
 
 
 class TestUnsupportedHardwareStops:

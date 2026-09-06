@@ -15,8 +15,10 @@ from toolshed import APP_NAME, __version__
 from toolshed.catalog.packs import load_packs
 from toolshed.desktop import desktop_file_installed
 from toolshed.hw import HardwareReport, Verdict, detect, verdict_for
+from toolshed.planner import build_plan
 from toolshed.ui.choose import ChoosePage
-from toolshed.ui.ready import ReadyPage
+from toolshed.ui.install import InstallPage
+from toolshed.ui.ready import ReadyPage, default_data_root
 
 _YES = "✓"   # check mark
 _NO = "✗"    # ballot x
@@ -125,12 +127,17 @@ class MainWindow(QtWidgets.QMainWindow):
         # lie told in three parts.
         self.choose_page: ChoosePage | None = None
         self.ready_page: ReadyPage | None = None
+        self.install_page: InstallPage | None = None
         if verdict.supported:
             self.choose_page = ChoosePage(load_packs(), report)
             self.choose_page.selection_changed.connect(self._sync_nav)
             self.ready_page = ReadyPage()
+            self.install_page = InstallPage()
+            self.install_page.done.connect(self._on_install_done)
+            self.install_page.failed.connect(self._on_install_failed)
             self.pages.addWidget(self.choose_page)
             self.pages.addWidget(self.ready_page)
+            self.pages.addWidget(self.install_page)
 
         self.back_button = QtWidgets.QPushButton("Back")
         self.back_button.clicked.connect(self._go_back)
@@ -156,6 +163,8 @@ class MainWindow(QtWidgets.QMainWindow):
         column.addLayout(nav)
         self.setCentralWidget(central)
 
+        self._installing = False
+        self._finished = False
         self.statusBar().showMessage(
             "Nothing you make is sent anywhere." if verdict.supported
             else "Nothing has been downloaded or installed."
@@ -165,12 +174,54 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- navigation ---------------------------------------------------------
 
     def _go_next(self) -> None:
+        # The primary button changes job as the wizard progresses: Continue,
+        # then Set it up, then Stop while work is happening, then Close.
+        if self._finished:
+            self.close()
+            return
+        if self._installing:
+            assert self.install_page
+            self.install_page.stop()
+            return
+
         index = self.pages.currentIndex()
+        if self.pages.currentWidget() is self.ready_page:
+            self._start_install()
+            return
         if index + 1 < self.pages.count():
             if self.pages.widget(index + 1) is self.ready_page and self.choose_page:
                 self.ready_page.set_selection(self.choose_page.selected())
             self.pages.setCurrentIndex(index + 1)
             self._sync_nav()
+
+    def _start_install(self) -> None:
+        assert self.choose_page and self.install_page
+        plan = build_plan(self.report, self.choose_page.selected(), default_data_root())
+        self.pages.setCurrentWidget(self.install_page)
+        # No going back once bytes are landing on disk; Stop is the way out.
+        self.back_button.setVisible(False)
+        self.next_button.setText("Stop")
+        self.next_button.setEnabled(True)
+        self._installing = True
+        self.install_page.start(plan)
+
+    def _on_install_done(self) -> None:
+        self._installing = False
+        self.install_page.heading.setText("Ready. Let's make something.")
+        self.install_page.current.setText(
+            "Everything is set up. Open ComfyUI and your workflows are waiting under "
+            "\"Toolshed\" in the Workflows sidebar.")
+        self.next_button.setText("Close")
+        self._finished = True
+
+    def _on_install_failed(self, message: str, reason_key: str) -> None:
+        self._installing = False
+        self.install_page.heading.setText("That did not work")
+        self.install_page.current.setText(message)
+        # Nothing is lost: part-downloaded files survive and the next run
+        # resumes them, so the honest offer is to try again.
+        self.next_button.setText("Close")
+        self._finished = True
 
     def _go_back(self) -> None:
         if self.pages.currentIndex() > 0:
@@ -179,7 +230,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _sync_nav(self) -> None:
         index = self.pages.currentIndex()
-        last = index == self.pages.count() - 1
         self.back_button.setVisible(index > 0)
 
         if not self.verdict.supported:
@@ -187,11 +237,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.next_button.setEnabled(True)
             return
 
-        if last:
-            # Deliberately not "Set it up": that button does not exist yet, and
-            # labelling it as though it does is how software earns distrust.
-            self.next_button.setText("Set it up (not built yet)")
-            self.next_button.setEnabled(False)
+        if self._installing:
+            self.next_button.setText("Stop")
+            self.next_button.setEnabled(True)
+            return
+        if self._finished:
+            self.next_button.setText("Close")
+            self.next_button.setEnabled(True)
+            return
+        if self.pages.currentWidget() is self.ready_page:
+            self.next_button.setText("Set it up")
+            self.next_button.setEnabled(True)
         elif self.choose_page and self.pages.currentWidget() is self.choose_page:
             chosen = bool(self.choose_page.selected())
             self.next_button.setText("Continue")

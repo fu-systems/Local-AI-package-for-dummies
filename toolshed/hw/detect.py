@@ -52,6 +52,10 @@ class Gpu:
     vram_mb: int | None = None
     driver_version: str = ""
     gfx: str = ""                    # AMD LLVM target, e.g. gfx1100
+    # NVIDIA compute capability, e.g. 8.9. Decides which CUDA wheel line the
+    # card can use, so it is worth asking for even though older drivers reject
+    # the query.
+    compute_capability: float | None = None
     discrete: bool = True
 
     @property
@@ -165,14 +169,20 @@ def _amd_marketing_name() -> str:
 # --------------------------------------------------------------------------
 
 def _nvidia_smi() -> list[Gpu]:
-    query = "name,memory.total,driver_version"
-    out = _run(["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"])
+    # compute_cap is the field older drivers reject outright, so ask for it
+    # first and fall back through progressively narrower queries.
+    queries = [
+        "name,memory.total,driver_version,compute_cap",
+        "name,memory.total,driver_version",
+        "name,memory.total",
+    ]
+    out = None
+    for query in queries:
+        out = _run(["nvidia-smi", f"--query-gpu={query}", "--format=csv,noheader,nounits"])
+        if out is not None:
+            break
     if out is None:
-        # Older drivers reject unknown fields wholesale rather than ignoring
-        # them, so a narrower query is worth one retry before giving up.
-        out = _run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"])
-        if out is None:
-            return []
+        return []
 
     gpus: list[Gpu] = []
     for line in out.strip().splitlines():
@@ -183,12 +193,19 @@ def _nvidia_smi() -> list[Gpu]:
             vram = int(float(cols[1]))
         except ValueError:
             vram = None
+        cap: float | None = None
+        if len(cols) > 3:
+            try:
+                cap = float(cols[3])
+            except ValueError:
+                cap = None
         gpus.append(
             Gpu(
                 vendor="nvidia",
                 name=cols[0],
                 vram_mb=vram,
                 driver_version=cols[2] if len(cols) > 2 else "",
+                compute_capability=cap,
             )
         )
     return gpus

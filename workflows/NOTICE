@@ -13,8 +13,14 @@ explicitly `null` for a graph hand-authored from scratch.
 No workflow here is CC0. An MIT derivative cannot be released into the public
 domain without stripping the notice MIT obliges us to keep.
 
-Adapted from (populated as each workflow triple is authored):
+Adapted from Comfy-Org/workflow_templates:
 
-  workflow file                                  upstream template
-  ---------------------------------------------  ----------------------------------
-  (none yet -- see catalog/recipes/*.generated.yaml)
+  3d/01 Photo to 3D model.json             <- 3d_pixal3d_trellis2_image_to_model
+  audio/01 Make music.json                 <- audio_ace_step_1_5_checkpoint
+  image/01 Text to picture (Z-Image).json  <- image_z_image_turbo_int8
+  image/02 Text to picture (SDXL).json     <- image_sdxl_simple
+  image/03 Edit a picture.json             <- image_qwen_image_edit_2511_int8
+  video/01 Text or picture to video.json   <- video_wan2_2_5B_ti2v
+
+Regenerate with tools/build_workflows.py. The graphs are Comfy Org's,
+unchanged apart from an added START HERE note, which never executes.
