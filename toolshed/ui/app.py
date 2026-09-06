@@ -14,7 +14,10 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from toolshed import APP_NAME, __version__
+from toolshed.catalog.packs import load_packs
 from toolshed.hw import HardwareReport, Verdict, detect, verdict_for
+from toolshed.ui.choose import ChoosePage
+from toolshed.ui.ready import ReadyPage
 
 _YES = "✓"   # check mark
 _NO = "✗"    # ballot x
@@ -75,8 +78,6 @@ class VerdictPage(QtWidgets.QWidget):
                 box_layout.addWidget(row)
             layout.addWidget(box)
 
-        layout.addStretch(1)
-
         details = QtWidgets.QTextEdit()
         details.setReadOnly(True)
         details.setPlainText(_technical_summary(report))
@@ -95,6 +96,7 @@ class VerdictPage(QtWidgets.QWidget):
         row.addStretch(1)
         layout.addLayout(row)
         layout.addWidget(details)
+        layout.addStretch(1)
 
 
 def _technical_summary(report: HardwareReport) -> str:
@@ -117,15 +119,105 @@ def _technical_summary(report: HardwareReport) -> str:
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    """A three-step wizard.
+
+    The first build stopped dead on the hardware verdict: it told you what your
+    machine could do and then offered no way forward at all. The pages are
+    stacked behind one navigation bar so there is always an obvious next step,
+    and always a way back.
+    """
+
     def __init__(self, report: HardwareReport, verdict: Verdict) -> None:
         super().__init__()
+        self.report = report
+        self.verdict = verdict
         self.setWindowTitle(f"{APP_NAME} {__version__}")
-        self.resize(720, 560)
-        self.setCentralWidget(VerdictPage(report, verdict))
+        self.resize(760, 620)
+
+        self.pages = QtWidgets.QStackedWidget()
+        self.verdict_page = VerdictPage(report, verdict)
+        self.pages.addWidget(self.verdict_page)
+
+        # Unsupported hardware gets one honest screen and no further steps.
+        # Walking someone through choosing packs we cannot install would be a
+        # lie told in three parts.
+        self.choose_page: ChoosePage | None = None
+        self.ready_page: ReadyPage | None = None
+        if verdict.supported:
+            self.choose_page = ChoosePage(load_packs(), report)
+            self.choose_page.selection_changed.connect(self._sync_nav)
+            self.ready_page = ReadyPage()
+            self.pages.addWidget(self.choose_page)
+            self.pages.addWidget(self.ready_page)
+
+        self.back_button = QtWidgets.QPushButton("Back")
+        self.back_button.clicked.connect(self._go_back)
+        self.next_button = QtWidgets.QPushButton()
+        self.next_button.setDefault(True)
+        # Connected once. Unsupported hardware has nowhere to go next, so the
+        # primary action is simply to close.
+        if verdict.supported:
+            self.next_button.clicked.connect(self._go_next)
+        else:
+            self.next_button.clicked.connect(self.close)
+
+        nav = QtWidgets.QHBoxLayout()
+        nav.setContentsMargins(28, 0, 28, 16)
+        nav.addWidget(self.back_button)
+        nav.addStretch(1)
+        nav.addWidget(self.next_button)
+
+        central = QtWidgets.QWidget()
+        column = QtWidgets.QVBoxLayout(central)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(self.pages, 1)
+        column.addLayout(nav)
+        self.setCentralWidget(central)
+
         self.statusBar().showMessage(
             "Nothing you make is sent anywhere." if verdict.supported
             else "Nothing has been downloaded or installed."
         )
+        self._sync_nav()
+
+    # -- navigation ---------------------------------------------------------
+
+    def _go_next(self) -> None:
+        index = self.pages.currentIndex()
+        if index + 1 < self.pages.count():
+            if self.pages.widget(index + 1) is self.ready_page and self.choose_page:
+                self.ready_page.set_selection(self.choose_page.selected())
+            self.pages.setCurrentIndex(index + 1)
+            self._sync_nav()
+
+    def _go_back(self) -> None:
+        if self.pages.currentIndex() > 0:
+            self.pages.setCurrentIndex(self.pages.currentIndex() - 1)
+            self._sync_nav()
+
+    def _sync_nav(self) -> None:
+        index = self.pages.currentIndex()
+        last = index == self.pages.count() - 1
+        self.back_button.setVisible(index > 0)
+
+        if not self.verdict.supported:
+            self.next_button.setText("Close")
+            self.next_button.setEnabled(True)
+            return
+
+        if last:
+            # Deliberately not "Set it up": that button does not exist yet, and
+            # labelling it as though it does is how software earns distrust.
+            self.next_button.setText("Set it up (not built yet)")
+            self.next_button.setEnabled(False)
+        elif self.choose_page and self.pages.currentWidget() is self.choose_page:
+            chosen = bool(self.choose_page.selected())
+            self.next_button.setText("Continue")
+            self.next_button.setEnabled(chosen)
+            self.next_button.setToolTip("" if chosen else "Pick at least one thing to make.")
+        else:
+            self.next_button.setText("Continue")
+            self.next_button.setEnabled(True)
 
 
 def build_application(

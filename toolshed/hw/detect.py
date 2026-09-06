@@ -24,6 +24,24 @@ from pathlib import Path
 # PCI vendor IDs, as they appear in /sys/class/drm/*/device/vendor.
 PCI_VENDORS = {0x10DE: "nvidia", 0x1002: "amd", 0x8086: "intel"}
 
+# How to write a vendor in front of a person. "amd GPU" looks like a debug
+# string; it was on screen in the first build and it looked cheap.
+VENDOR_LABELS = {
+    "nvidia": "NVIDIA graphics card",
+    "amd": "AMD Radeon graphics",
+    "intel": "Intel graphics",
+    "unknown": "graphics card",
+}
+
+# The database lspci uses to turn 1002:744c into a product name. Shipped by
+# hwdata/pci.ids, present on essentially every desktop Linux.
+PCI_IDS_PATHS = (
+    "/usr/share/hwdata/pci.ids",
+    "/usr/share/misc/pci.ids",
+    "/usr/share/pci.ids",
+    "/var/lib/pciutils/pci.ids",
+)
+
 _PROBE_TIMEOUT = 10
 
 
@@ -41,7 +59,7 @@ class Gpu:
         return None if self.vram_mb is None else round(self.vram_mb / 1024, 1)
 
     def describe(self) -> str:
-        parts = [self.name or f"{self.vendor} GPU"]
+        parts = [self.name or VENDOR_LABELS.get(self.vendor, VENDOR_LABELS["unknown"])]
         if self.vram_gb is not None:
             parts.append(f"({self.vram_gb:g} GB)")
         return " ".join(parts)
@@ -81,6 +99,65 @@ def _run(cmd: list[str]) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout if out.returncode == 0 else None
+
+
+def _clean_pci_name(raw: str) -> str:
+    """Turn a pci.ids entry into something worth showing a beginner.
+
+    Entries look like ``Navi 31 [Radeon RX 7900 XT/7900 XTX/7900 GRE/7900M]``:
+    a chip codename plus a bracketed list of the cards built on it. The bracket
+    is the part a person recognises.
+
+    When the bracket names several cards we cannot tell which one this is --
+    they share a device ID and only the subsystem ID separates them -- so we
+    return nothing rather than guess. VRAM is what actually drives every
+    decision we make, and it is reported separately and exactly.
+    """
+    start, end = raw.find("["), raw.rfind("]")
+    inner = raw[start + 1:end].strip() if 0 <= start < end else raw.strip()
+    if not inner or "/" in inner:
+        return ""
+    return inner
+
+
+def _pci_ids_lookup(vendor_id: int, device_id: int) -> str:
+    """Resolve a marketing name from the system PCI ID database."""
+    want_vendor = f"{vendor_id:04x}"
+    want_device = f"{device_id:04x}"
+    for path in PCI_IDS_PATHS:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                in_vendor = False
+                for line in fh:
+                    if not line.strip() or line.lstrip().startswith("#"):
+                        continue
+                    if not line.startswith("\t"):
+                        # A vendor line: "1002  Advanced Micro Devices, Inc."
+                        in_vendor = line.split(" ", 1)[0] == want_vendor
+                        continue
+                    if not in_vendor or line.startswith("\t\t"):
+                        continue  # subsystem lines are two tabs deep
+                    fields = line.strip().split(None, 1)
+                    if len(fields) == 2 and fields[0] == want_device:
+                        return _clean_pci_name(fields[1])
+        except OSError:
+            continue
+    return ""
+
+
+def _amd_marketing_name() -> str:
+    """Ask ROCm for the card's real name, when ROCm is installed."""
+    out = _run(["rocm-smi", "--showproductname"]) or _run(["rocminfo"])
+    if not out:
+        return ""
+    for line in out.splitlines():
+        if "Marketing Name" in line or "Card Series" in line or "Card Model" in line:
+            _, _, value = line.partition(":")
+            value = value.strip()
+            # rocminfo lists the CPU agent first; skip anything that is not a card.
+            if value and not value.lower().startswith(("cpu", "unknown")):
+                return value
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -161,6 +238,18 @@ def _linux_gpus() -> tuple[list[Gpu], list[str]]:
             continue
         vendor = PCI_VENDORS.get(vendor_id, "unknown")
 
+        # The card's name, best source first. amdgpu does not expose
+        # device/label, which is why the first build showed "amd GPU (20 GB)".
+        try:
+            device_id = int(_read(device / "device"), 16)
+        except ValueError:
+            device_id = 0
+        name = _read(device / "label")
+        if not name and vendor == "amd":
+            name = _amd_marketing_name()
+        if not name and device_id:
+            name = _pci_ids_lookup(vendor_id, device_id)
+
         vram_mb: int | None = None
         # amdgpu reports exact bytes. This is the only fully reliable VRAM
         # number available anywhere in this module.
@@ -173,7 +262,7 @@ def _linux_gpus() -> tuple[list[Gpu], list[str]]:
         # carve-out that must not be read as a real card.
         discrete = not (vendor == "amd" and gfx.startswith("gfx11") and (vram_mb or 0) < 1024)
 
-        gpus.append(Gpu(vendor=vendor, name=_read(device / "label") or "", vram_mb=vram_mb,
+        gpus.append(Gpu(vendor=vendor, name=name, vram_mb=vram_mb,
                         gfx=gfx, discrete=discrete))
 
     # NVIDIA does not publish VRAM through sysfs, so merge in nvidia-smi.

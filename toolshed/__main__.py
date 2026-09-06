@@ -63,6 +63,18 @@ def selftest(report_path: Path | None = None) -> int:
     if not workflows_dir.is_dir():
         failures.append("workflows directory missing from the bundle")
 
+    # The packs the user chooses from. Loading them here means a bundle that
+    # shipped without catalog/packs.yaml fails the build, not the beginner.
+    from toolshed.catalog.packs import load_packs  # noqa: PLC0415
+
+    packs = load_packs()
+    sized = [p for p in packs if p.download_bytes is not None]
+    lines.append(f"packs:           {len(packs)} ({len(sized)} with a derived size)")
+    if not packs:
+        failures.append("no packs in the bundle; the choose screen would be blank")
+    if len(sized) != len(packs):
+        failures.append("some packs have no size; packs.yaml points at a missing recipe")
+
     from toolshed.hw import detect, verdict_for  # noqa: PLC0415
 
     hw = detect()
