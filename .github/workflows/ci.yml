@@ -86,23 +86,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Toolshed must not import or bundle ComfyUI
-        run: |
-          # Guard the guard. Without this, a missing toolshed/ makes grep exit 2,
-          # the `if` treats that as false, and this job passes having checked
-          # nothing -- which is exactly what it did before.
-          test -d toolshed || { echo "::error::toolshed/ package is missing"; exit 1; }
-
-          if grep -rnE '^\s*(from|import)\s+(comfy|nodes|folder_paths)\b' \
-               --include='*.py' toolshed/; then
-            echo "::error::Toolshed must not import ComfyUI. See CONTRIBUTING.md."
-            exit 1
-          fi
-
-          # docs/PLAN.md requires this job to catch ComfyUI in a packaging spec
-          # too: bundling it would redistribute GPL code.
-          if [ -d packaging ] && grep -rniE 'comfyui' packaging/ ; then
-            echo "::error::ComfyUI referenced in packaging; it must never be bundled."
-            exit 1
-          fi
-
-          echo "GPL boundary intact"
+        # The check itself lives in tools/check_gpl_boundary.sh so it can be
+        # tested. Inline here, it could only ever be exercised by pushing and
+        # watching -- and a safety check nobody can exercise is a wish.
+        run: sh tools/check_gpl_boundary.sh
