@@ -49,9 +49,13 @@ WizardStyle=modern
 SetupIconFile={#MyRepoRoot}\packaging\windows\toolshed.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
-; Ask nicely via the restart manager instead of failing on a locked file when
-; someone upgrades while Toolshed is open.
-CloseApplications=yes
+; CloseApplications=no on purpose. Inno's default (yes) runs a Restart Manager
+; scan for processes holding files it is about to write. On a first install
+; there is nothing to close, and that scan is a known way for a silent install
+; to stall on an unattended machine -- which is exactly what happened in CI.
+; Revisit only if in-place upgrades over a running Toolshed become a problem,
+; and pair it with a bounded wait if so.
+CloseApplications=no
 RestartApplications=no
 ; No LicenseFile page on purpose: a wall of Apache-2.0 text is not what a
 ; nervous beginner needs in a wizard. The licence ships as a file in {app}.

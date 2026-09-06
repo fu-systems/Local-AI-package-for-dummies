@@ -1,18 +1,22 @@
+# ============================================================================
+# BUILDS ARE TRIGGERED MANUALLY, BY A HUMAN, ONLY.
+#
+# This workflow runs on workflow_dispatch and nothing else. Do NOT add push,
+# pull_request, schedule, or tag triggers to it.
+#
+# NO AI AGENT MAY EVER TRIGGER A BUILD. Not by pushing, not by merging, not by
+# dispatching a workflow, not by any other means. If a build is needed, say so
+# and let a human start it.
+#
+# See README.md and CLAUDE.md. This rule exists because an unbounded wait in a
+# build step, triggered automatically on merge, burned hours of runner time.
+# ============================================================================
+
 name: build-windows
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-    paths:
-      - "toolshed/**"
-      - "packaging/**"
-      - "pyproject.toml"
-      - ".github/workflows/build-windows.yml"
+  # workflow_dispatch ONLY. See the note above before adding anything here.
   workflow_dispatch:
-  schedule:
-    - cron: "37 5 * * 1"
 
 permissions:
   contents: read
@@ -30,6 +34,8 @@ jobs:
   build:
     # Windows Server 2025. Inno Setup 6.7.1 and 7-Zip are preinstalled, and
     # Python 3.12 is in the runner tool cache so setup-python is a cache hit.
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 30
     runs-on: windows-latest
     defaults:
       run:
@@ -133,9 +139,18 @@ jobs:
           # sys.stderr are None and toolshed/_streams.py is load-bearing. A
           # windowed executable cannot write to the workflow log at all, which
           # is why --report exists.
+          # Never wait on a GUI process without a deadline. A windowed build that
+          # pops a modal error box has nobody to click OK on a headless runner,
+          # and -Wait would sit there until the job timeout.
           $p = Start-Process -FilePath "dist/toolshed/toolshed.exe" `
                  -ArgumentList "--selftest","--report","$PWD/selftest.txt" `
-                 -Wait -PassThru
+                 -PassThru
+          if (-not $p.WaitForExit(120 * 1000)) {
+            Write-Host "::error::windowed selftest did not finish within 120s; killing it"
+            $p.Kill($true)
+            if (Test-Path selftest.txt) { Get-Content selftest.txt }
+            exit 1
+          }
           if (Test-Path selftest.txt) { Get-Content selftest.txt }
           else { Write-Error "the windowed build produced no report"; exit 1 }
           if ($p.ExitCode -ne 0) { Write-Error "windowed selftest exit $($p.ExitCode)"; exit 1 }
@@ -182,10 +197,37 @@ jobs:
 
       - name: The installer must install, run and uninstall
         run: |
+          # This step hung for over three hours on an unbounded Start-Process
+          # -Wait. Every wait here now has a deadline and dumps evidence on
+          # expiry, so the worst case is a fast failure with a log attached.
+          function Show-InstallDiagnostics {
+            Write-Host "--- inno.log ---"
+            if (Test-Path inno.log) { Get-Content inno.log -Tail 60 } else { Write-Host "(none)" }
+            Write-Host "--- install dir ---"
+            $d = "$env:LOCALAPPDATA\Programs\Toolshed"
+            if (Test-Path $d) { Get-ChildItem $d | Select-Object -First 20 | Out-String }
+            else { Write-Host "(not created)" }
+            Write-Host "--- surviving processes ---"
+            Get-Process -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match 'toolshed|setup|unins' } |
+              Format-Table Id, Name, StartTime | Out-String
+          }
+
           $setup = (Get-ChildItem out -Filter *Setup.exe).FullName
           # /VERYSILENT proves the per-user, no-UAC path works unattended.
-          Start-Process $setup -ArgumentList `
-            "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/LOG=$PWD\inno.log" -Wait
+          $si = Start-Process $setup -ArgumentList `
+            "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/LOG=$PWD\inno.log" -PassThru
+          if (-not $si.WaitForExit(180 * 1000)) {
+            Write-Host "::error::the silent install did not finish within 180s; killing it"
+            $si.Kill($true)
+            Show-InstallDiagnostics
+            exit 1
+          }
+          if ($si.ExitCode -ne 0) {
+            Write-Host "::error::installer exited $($si.ExitCode)"
+            Show-InstallDiagnostics
+            exit 1
+          }
           $app = "$env:LOCALAPPDATA\Programs\Toolshed\toolshed-console.exe"
           if (-not (Test-Path $app)) { Write-Error "not installed to $app"; exit 1 }
           $env:QT_QPA_PLATFORM = "offscreen"
@@ -208,10 +250,20 @@ jobs:
           # one is a PowerShell line continuation.)
           $exe = if ($u -match '^"([^"]+)"') { $Matches[1] } else { ($u -split ' ')[0] }
           if (-not (Test-Path $exe)) { Write-Error "uninstaller not found at $exe"; exit 1 }
-          Start-Process $exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait
+          $su = Start-Process $exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -PassThru
+          if (-not $su.WaitForExit(180 * 1000)) {
+            Write-Host "::error::the silent uninstall did not finish within 180s; killing it"
+            $su.Kill($true)
+            Show-InstallDiagnostics
+            exit 1
+          }
           Write-Host "install / run / uninstall verified"
 
       - name: Checksums
+        # always(): a build that produced a testable installer should hand it
+        # over even when a later verification step is unhappy. Otherwise a
+        # failing *check* destroys the *output*.
+        if: always()
         run: |
           Get-ChildItem out -Include *.exe,*.zip -Recurse | ForEach-Object {
             $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
@@ -220,6 +272,7 @@ jobs:
           Get-Content out/SHA256SUMS.txt
 
       - name: Upload the portable zip
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.zip.outputs.name }}
@@ -228,6 +281,7 @@ jobs:
           retention-days: 14
 
       - name: Upload the installer
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: toolshed-windows-installer
@@ -252,6 +306,8 @@ jobs:
           retention-days: 7
 
   release:
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest

@@ -1,0 +1,75 @@
+# What the user actually chooses from, in their words.
+#
+# This file is HAND-WRITTEN and holds only human-facing text plus the hardware
+# floor for each pack. Everything machine-checkable -- model filenames,
+# destination folders, download sizes -- stays in catalog/recipes/*.generated.yaml,
+# which is derived from Comfy Org's official templates by tools/derive_catalog.py.
+# `recipe` below is the link between the two, and the loader reads the download
+# size from the generated file so the number can never drift from ground truth.
+#
+# VRAM floors marked provisional are engineering estimates, not measurements.
+# docs/PLAN.md M0 replaces them with real numbers taken on real cards. They are
+# deliberately conservative: offering a pack that then fails is worse than
+# hiding one that might have worked.
+
+schema_version: 1
+
+packs:
+  - id: image.zimage
+    modality: Pictures
+    name: "Make pictures"
+    blurb: "Describe a picture and get one back in a few seconds. The best place to start."
+    recipe: image_z_image_turbo_int8
+    vram_gb_min: 8          # provisional
+    licence: "Apache 2.0 — free for any use, including commercial."
+    default_checked: true
+
+  - id: image.sdxl
+    modality: Pictures
+    name: "Make pictures (classic model)"
+    blurb: "Older and a little slower, but it fits on smaller graphics cards and has a huge
+            library of community add-ons."
+    recipe: image_sdxl_simple
+    vram_gb_min: 6          # provisional
+    licence: "CreativeML OpenRAIL++-M — free to use, with conditions on how you use it."
+    default_checked: false
+
+  - id: image.qwen_edit
+    modality: Pictures
+    name: "Edit a picture"
+    blurb: "Change something in a photo by describing the change. Large download and needs a
+            big graphics card."
+    recipe: image_qwen_image_edit_2511_int8
+    vram_gb_min: 16         # provisional
+    licence: "Apache 2.0 — free for any use, including commercial."
+    default_checked: false
+
+  - id: video.wan22
+    modality: Video
+    name: "Make short videos"
+    blurb: "Text to video, and picture to video. A few seconds of footage takes a few minutes."
+    recipe: video_wan2_2_5B_ti2v
+    vram_gb_min: 8          # provisional
+    licence: "Apache 2.0 — free for any use, including commercial."
+    default_checked: false
+
+  - id: audio.acestep
+    modality: Music
+    name: "Make music"
+    blurb: "Describe a style and add your own lyrics to get a full song."
+    recipe: audio_ace_step_1_5_checkpoint
+    vram_gb_min: 8          # provisional
+    licence: "Apache 2.0 — free for any use, including commercial."
+    default_checked: false
+
+  - id: model3d.trellis2
+    modality: 3D models
+    name: "Turn a photo into a 3D model"
+    blurb: "Upload one picture of an object and get a textured 3D model you can open in Blender."
+    recipe: 3d_pixal3d_trellis2_image_to_model
+    vram_gb_min: 10         # provisional
+    licence: "MIT — free for any use, including commercial."
+    default_checked: false
+    # Nobody has published a working result for this on AMD. The setup smoke
+    # test decides per machine; see docs/PLAN.md section 10.
+    experimental_on: [amd]

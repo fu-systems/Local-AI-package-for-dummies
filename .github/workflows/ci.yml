@@ -14,6 +14,8 @@ concurrency:
 
 jobs:
   test:
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       # checkout@v4 and setup-python@v5 are node20, which the runners already
@@ -47,6 +49,8 @@ jobs:
   gpl-boundary:
     # ComfyUI is GPL-3.0-or-later. Toolshed downloads it and drives it as a
     # separate process, and must never import or bundle it. See CONTRIBUTING.md.
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

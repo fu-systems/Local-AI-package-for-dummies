@@ -1,23 +1,22 @@
+# ============================================================================
+# BUILDS ARE TRIGGERED MANUALLY, BY A HUMAN, ONLY.
+#
+# This workflow runs on workflow_dispatch and nothing else. Do NOT add push,
+# pull_request, schedule, or tag triggers to it.
+#
+# NO AI AGENT MAY EVER TRIGGER A BUILD. Not by pushing, not by merging, not by
+# dispatching a workflow, not by any other means. If a build is needed, say so
+# and let a human start it.
+#
+# See README.md and CLAUDE.md. This rule exists because an unbounded wait in a
+# build step, triggered automatically on merge, burned hours of runner time.
+# ============================================================================
+
 name: build-linux
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-    # Catalogue and documentation changes will be most pull requests and must
-    # not cost twenty minutes each. Pushes to main are unfiltered, so main
-    # always has a known-good artifact.
-    paths:
-      - "toolshed/**"
-      - "packaging/**"
-      - "pyproject.toml"
-      - ".github/workflows/build-linux.yml"
+  # workflow_dispatch ONLY. See the note above before adding anything here.
   workflow_dispatch:
-  schedule:
-    # Upstream PySide6 or PyInstaller releases break builds. Find out on a
-    # Monday morning, not on release day.
-    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -46,6 +45,8 @@ env:
 
 jobs:
   build:
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     # The PySide6-Essentials wheel is manylinux_2_34, so glibc 2.34 is our
     # floor. ubuntu-latest is 24.04 with glibc 2.39: building there produces a
@@ -202,6 +203,8 @@ jobs:
   # ONLY what docs say a user needs, so it fails the day someone adds a library
   # we forgot to write down.
   verify-clean-2204:
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 15
     needs: build
     runs-on: ubuntu-latest
     container:
@@ -232,6 +235,8 @@ jobs:
 
   # Built on 22.04, must also run on 24.04.
   verify-forward-2404:
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 15
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -251,6 +256,8 @@ jobs:
           xvfb-run -a "$D/toolshed" --selftest
 
   release:
+    # A hung step must not burn six hours of runner time.
+    timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, verify-clean-2204, verify-forward-2404]
     runs-on: ubuntu-latest

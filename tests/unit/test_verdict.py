@@ -141,3 +141,46 @@ class TestMessaging:
         """gfx1031 is not officially supported by ROCm but usually works with an
         override. That is a consent decision at install time, not a refusal here."""
         assert verdict_for(report("linux", AMD_6700XT)).supported
+
+
+class TestDesktopFileDetection:
+    """The XDG portal warning a user sees when running the portable tarball.
+
+    Qt registers the desktop file name with the portal; when no matching
+    .desktop is installed the portal answers with a DBus error on stderr. We
+    only claim the name when the file is really there.
+    """
+
+    def _fn(self):
+        from toolshed.ui.app import _desktop_file_installed
+
+        return _desktop_file_installed
+
+    def test_absent_when_no_desktop_file_anywhere(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "a") + ":" + str(tmp_path / "b"))
+        assert self._fn()("toolshed") is False
+
+    def test_found_in_xdg_data_home(self, tmp_path, monkeypatch):
+        apps = tmp_path / "home" / "applications"
+        apps.mkdir(parents=True)
+        (apps / "toolshed.desktop").write_text("[Desktop Entry]\n")
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "nowhere"))
+        assert self._fn()("toolshed") is True
+
+    def test_found_in_a_later_xdg_data_dir(self, tmp_path, monkeypatch):
+        apps = tmp_path / "b" / "applications"
+        apps.mkdir(parents=True)
+        (apps / "toolshed.desktop").write_text("[Desktop Entry]\n")
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("XDG_DATA_DIRS", f"{tmp_path / 'a'}:{tmp_path / 'b'}")
+        assert self._fn()("toolshed") is True
+
+    def test_non_linux_is_unaffected(self, monkeypatch):
+        """Only the XDG portal cares. Windows must not lose the desktop name."""
+        monkeypatch.setattr("sys.platform", "win32")
+        assert self._fn()("toolshed") is True
