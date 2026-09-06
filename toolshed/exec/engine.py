@@ -17,6 +17,7 @@ docs/UPSTREAM.md for the table and where each was verified.
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import subprocess
 import sys
@@ -29,7 +30,7 @@ from pathlib import Path
 
 import httpx
 
-from toolshed.exec.proc import popen_kwargs, terminate_tree
+from toolshed.exec.proc import child_environment, popen_kwargs, terminate_tree
 from toolshed.exec.uvtool import venv_python
 
 # ComfyUI's own default. Tried first so that a user who already knows the
@@ -153,6 +154,7 @@ class Engine:
     _log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINES_KEPT))
     _reader: threading.Thread | None = None
     _stopping: bool = False
+    _ready: bool = False
 
     @property
     def layout(self) -> Layout:
@@ -217,15 +219,29 @@ class Engine:
         self.layout.output_dir.mkdir(parents=True, exist_ok=True)
         self.layout.log_file.parent.mkdir(parents=True, exist_ok=True)
 
+        # ComfyUI needs these to exist; folder_paths.py only creates input/.
+        for sub in ("custom_nodes", "input", "temp", "user"):
+            (self.layout.comfy_base / sub).mkdir(parents=True, exist_ok=True)
+
+        # An engine left over from a Toolshed that crashed would still hold the
+        # port, so the next launch either fails readiness or starts a second
+        # copy beside it. The pid file names ours; anything else on the port is
+        # not ours to touch.
+        self._stop_orphan()
+
+        # An explicit --port in the user's extra options wins, and readiness
+        # must poll that port rather than the one we would have chosen.
+        wanted = _port_from_args(self.extra_args)
+        if wanted:
+            self.port = wanted
         if not self.port:
             self.port = choose_port()
 
-        import os
-
-        # Inherit the user's environment and lay ours over it. This carries
-        # HSA_OVERRIDE_GFX_VERSION for the AMD cards that need it; dropping it
-        # does not fail loudly, it just means the engine cannot use the GPU.
-        environment = {**os.environ, **self.env}
+        # Inherit the user's environment, minus the frozen app's own loader
+        # paths, with ours laid over it. Ours carries HSA_OVERRIDE_GFX_VERSION
+        # for the AMD cards that need it; dropping it does not fail loudly, it
+        # just means the engine cannot use the GPU.
+        environment = child_environment(self.env)
         # Unbuffered, or the log stays empty for a minute and the user watches
         # a blank box while the engine is in fact starting normally.
         environment["PYTHONUNBUFFERED"] = "1"
@@ -243,6 +259,8 @@ class Engine:
             **popen_kwargs(new_group=True),
         )
         self._stopping = False
+        self._ready = False
+        self._write_pidfile()
         self._reader = threading.Thread(target=self._drain, args=(on_line, on_died),
                                         daemon=True)
         self._reader.start()
@@ -256,25 +274,47 @@ class Engine:
         once it had written 64 KB nobody was collecting.
         """
         assert self.process and self.process.stdout
+        # The pipe must be drained whatever happens to the log file. A reader
+        # that gave up because the file could not be opened would leave the
+        # engine blocked on a full pipe after 64 KB of output -- frozen, with
+        # nothing to say why.
         try:
-            with self.layout.log_file.open("a", encoding="utf-8") as fh:
+            fh = self.layout.log_file.open("a", encoding="utf-8")
+        except OSError:
+            fh = None
+        try:
+            if fh:
                 fh.write(f"\n--- started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-                for line in self.process.stdout:
-                    line = line.rstrip("\n")
-                    self._log.append(line)
-                    fh.write(line + "\n")
-                    fh.flush()
-                    if on_line:
-                        on_line(line)
+            for line in self.process.stdout:
+                line = line.rstrip("\n")
+                self._log.append(line)
+                if fh:
+                    try:
+                        fh.write(line + "\n")
+                        fh.flush()
+                    except OSError:
+                        fh = None
+                if on_line:
+                    on_line(line)
         except (OSError, ValueError):
             # The pipe closing under us is how a stopped engine ends. Not news.
             pass
+        finally:
+            if fh:
+                fh.close()
 
         # The loop above ends when the engine's output does, which means it has
-        # exited. Reporting that is the whole point of watching.
+        # exited -- or is about to. EOF arrives before the kernel has reaped
+        # the child, so poll() can still say "running" here; wait briefly so
+        # the exit code is real rather than None.
         if on_died and not self._stopping and self.process is not None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                self.process.wait(timeout=5)
             code = self.process.poll()
-            if code is not None and code != 0:
+            # Only once it was up: a death during startup is reported by
+            # wait_until_ready, and reporting it here too showed the user two
+            # conflicting messages for one event.
+            if code is not None and self._ready:
                 on_died(self._explain_exit(code))
 
     def _explain_exit(self, code: int) -> str:
@@ -285,6 +325,16 @@ class Engine:
         the user did, and it is not out of memory, so it should not be reported
         as either.
         """
+        if code == 0:
+            return "ComfyUI closed on its own."
+        if sys.platform == "win32":
+            # Windows has no signals; a crash is an NTSTATUS in the exit code.
+            unsigned = code & 0xFFFFFFFF
+            if unsigned == 0xC0000005:
+                return "ComfyUI crashed (access violation). The graphics driver is the usual cause."
+            if unsigned >= 0xC0000000:
+                return f"ComfyUI crashed (Windows error 0x{unsigned:08X})."
+            return f"ComfyUI stopped unexpectedly (exit code {code})."
         if code == -6:
             return ("ComfyUI was stopped by the graphics driver. This is usually a "
                     "driver-level fault rather than anything you did.")
@@ -295,6 +345,45 @@ class Engine:
             return f"ComfyUI was stopped by signal {-code}."
         return f"ComfyUI stopped unexpectedly (exit code {code})."
 
+    def _write_pidfile(self) -> None:
+        try:
+            pid_file(self.root).parent.mkdir(parents=True, exist_ok=True)
+            pid_file(self.root).write_text(str(self.process.pid), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _stop_orphan(self) -> None:
+        """Stop a ComfyUI a previous Toolshed left behind, and only that.
+
+        Matched by the pid file *and* the process's own command line naming
+        our engine directory, so a pid reused by something else since is left
+        alone. On platforms without /proc the command line cannot be read, so
+        nothing is killed rather than something wrong.
+        """
+        import os
+
+        path = pid_file(self.root)
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return
+        cmdline = Path(f"/proc/{pid}/cmdline")
+        try:
+            argv = cmdline.read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            path.unlink(missing_ok=True)
+            return
+        if str(self.layout.engine_dir) in argv:
+            with contextlib.suppress(OSError):
+                os.kill(pid, 15)
+            deadline = time.monotonic() + STOP_TIMEOUT
+            while time.monotonic() < deadline and cmdline.exists():
+                time.sleep(0.1)
+            if cmdline.exists():
+                with contextlib.suppress(OSError):
+                    os.kill(pid, 9)
+        path.unlink(missing_ok=True)
+
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
@@ -302,7 +391,9 @@ class Engine:
         """Does the server answer? /system_stats is a real handler in v0.34.0's
         server.py, so a 200 means the app is up, not merely the socket."""
         try:
-            reply = httpx.get(f"{self.url}/system_stats", timeout=timeout)
+            # trust_env=False: loopback must never go through a proxy, and
+            # httpx would otherwise honour HTTP(S)_PROXY for 127.0.0.1 too.
+            reply = httpx.get(f"{self.url}/system_stats", timeout=timeout, trust_env=False)
         except httpx.HTTPError:
             return False
         return reply.status_code == 200
@@ -327,6 +418,7 @@ class Engine:
                 self.stop()
                 raise EngineError("Stopped.", reason_key="cancelled")
             if self.responds():
+                self._ready = True
                 return
             if not self.is_running():
                 raise EngineError(
@@ -361,6 +453,20 @@ class Engine:
         return "\n".join(list(self._log)[-lines:])
 
 
+def _port_from_args(args: list[str]) -> int:
+    """A --port the user put in the extra options, or 0."""
+    for i, arg in enumerate(args):
+        if arg == "--port" and i + 1 < len(args) and args[i + 1].isdigit():
+            return int(args[i + 1])
+        if arg.startswith("--port=") and arg[7:].isdigit():
+            return int(arg[7:])
+    return 0
+
+
+def pid_file(root: Path) -> Path:
+    return root / "state" / "engine.pid"
+
+
 def flags_file(root: Path) -> Path:
     return root / "state" / "engine-flags.txt"
 
@@ -383,7 +489,9 @@ def read_extra_flags(root: Path) -> list[str]:
     if not path.is_file():
         return []
     try:
-        return shlex.split(path.read_text(encoding="utf-8"), comments=True)
+        # posix=False on Windows, or every backslash in a path is eaten.
+        return shlex.split(path.read_text(encoding="utf-8"), comments=True,
+                           posix=(sys.platform != "win32"))
     except (OSError, ValueError):
         return []
 

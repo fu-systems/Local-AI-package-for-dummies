@@ -39,6 +39,10 @@ if [ -z "${TOOLSHED_UNINSTALL_RELOCATED:-}" ]; then
 fi
 
 ROOT="${TOOLSHED_ROOT:-${HOME}/Toolshed}"
+# A trailing slash would turn the "is this / or $HOME" checks below into
+# string comparisons that never match, and "$ROOT/" is exactly what a shell's
+# tab completion produces.
+ROOT="${ROOT%/}"
 APP_DIR="${HOME}/.local/share/toolshed/app"
 BIN_DIR="${HOME}/.local/bin"
 DESKTOP_DIR="${HOME}/.local/share/applications"

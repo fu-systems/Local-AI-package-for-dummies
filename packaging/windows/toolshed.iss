@@ -160,15 +160,21 @@ begin
   begin
     Root := DataRoot();
     PurgeDataRoot();
-    if DirExists(Root + '\models') then
-      MsgBox('Toolshed has been removed.'#13#10#13#10 +
-             'Your models were kept, in ' + Root + '\models.'#13#10 +
-             'Nothing else was left anywhere. Delete that folder too if you ' +
-             'want the disk space back.',
-             mbInformation, MB_OK)
-    else
-      MsgBox('Toolshed has been removed.'#13#10#13#10 +
-             'Nothing was left anywhere.',
-             mbInformation, MB_OK);
+    // Never a dialog under /SILENT or /VERYSILENT: an unattended uninstall
+    // -- CI, a deployment script -- would sit behind a message box nobody
+    // is there to dismiss.
+    if not UninstallSilent then
+    begin
+      if DirExists(Root + '\models') then
+        MsgBox('Toolshed has been removed.'#13#10#13#10 +
+               'Your models were kept, in ' + Root + '\models.'#13#10 +
+               'Nothing else was left anywhere. Delete that folder too if you ' +
+               'want the disk space back.',
+               mbInformation, MB_OK)
+      else
+        MsgBox('Toolshed has been removed.'#13#10#13#10 +
+               'Nothing was left anywhere.',
+               mbInformation, MB_OK);
+    end;
   end;
 end;

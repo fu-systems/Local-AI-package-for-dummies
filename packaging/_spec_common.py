@@ -76,4 +76,4 @@ TREE_EXCLUDES = ["__pycache__", "*.pyc", "*.pyo", ".DS_Store", "*.part", ".gitig
 # Bundled rather than downloaded. Both are small, and a catalogue inside the
 # installer is what lets a machine with no network still reach the hardware
 # verdict screen instead of showing an error before the first sentence.
-DATA_DIRS = ["catalog", "workflows"]
+DATA_DIRS = ["catalog", "workflows", "assets"]

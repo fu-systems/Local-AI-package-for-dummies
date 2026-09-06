@@ -4,17 +4,29 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from PySide6 import QtWidgets
 
 from toolshed.catalog.packs import Pack, total_bytes
 
 
+def windows_data_root(system_drive: str) -> PureWindowsPath:
+    """``C:\\Toolshed`` from the ``SYSTEMDRIVE`` variable.
+
+    SYSTEMDRIVE is ``C:`` with no backslash, and ``Path("C:") / "Toolshed"``
+    is ``C:Toolshed`` -- a *drive-relative* path, meaning "Toolshed under
+    whatever the current directory on C: happens to be". Every install would
+    have landed somewhere different depending on how the app was launched.
+    """
+    drive = system_drive.strip().rstrip("\\/") or "C:"
+    return PureWindowsPath(drive + "\\", "Toolshed")
+
+
 def default_data_root() -> Path:
     """Where an installation would live, per docs/PLAN.md section 3."""
     if sys.platform == "win32":
-        return Path(os.environ.get("SYSTEMDRIVE", "C:")) / "Toolshed"
+        return Path(windows_data_root(os.environ.get("SYSTEMDRIVE", "C:")))
     return Path.home() / "Toolshed"
 
 

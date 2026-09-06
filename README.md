@@ -78,6 +78,25 @@ driver-coupled and must come from your distribution:
 `install.sh` checks for these and tells you what is missing. Ubuntu 22.04 is the
 oldest supported release.
 
+## Making things
+
+Two ways, and the first one is the point.
+
+**Easy mode** is a prompt box and a button. Pick what you want to make, type a
+description, press the button. Everything else already has a working value —
+size, steps, sampler, which model, the picture a 3D model starts from — so
+nothing needs touching on the first run, or any run.
+
+The settings are all there when you want them, in two panels that are shut by
+default and labelled optional. They are built from what your ComfyUI actually
+reports, so the numbers have the real limits and the dropdowns list the models
+you really have. **Reset to the defaults** puts everything back, so there is no
+way to get it into a state where the button stops working.
+
+**ComfyUI itself** is the other way, with the same ready-made workflows in the
+Workflows sidebar under "Toolshed". Easy mode drives those exact files, so
+anything you make one way you can open and pick apart the other.
+
 ## Removing it
 
 **Linux**

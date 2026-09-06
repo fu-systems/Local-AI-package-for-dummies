@@ -43,6 +43,16 @@ class Cancelled(RuntimeError):
     """The user asked to stop. Not an error; the .part file survives."""
 
 
+class _StalePart(Exception):
+    """The .part on disk is longer than the file the server has.
+
+    That happens when a model is re-published smaller under the same name, or
+    when a .part from some other attempt is lying about. The server answers a
+    Range past its end with 416, and taking that as "already have it all" --
+    which is what this code did -- would install the stale bytes as the model.
+    """
+
+
 @dataclass
 class Progress:
     filename: str
@@ -78,6 +88,13 @@ def check_space(dest_dir: Path, needed: int) -> None:
             f"{want / 1e9:.1f} GB, {free / 1e9:.1f} GB free.",
             reason_key="disk_full",
         )
+
+
+def _total_from_416(response: httpx.Response) -> int:
+    """The full length a 416 reports, as ``Content-Range: bytes */N``, or 0."""
+    header = response.headers.get("content-range", "")
+    _, _, tail = header.rpartition("/")
+    return int(tail) if tail.strip().isdigit() else 0
 
 
 def _headers(existing: int, token: str | None) -> dict[str, str]:
@@ -134,13 +151,41 @@ def _stream_to_part(
             for block in iter(lambda: fh.read(CHUNK), b""):
                 digest.update(block)
 
+    try:
+        return _stream_response(client, url, part, existing, digest, token=token,
+                                expected_total=expected_total, on_progress=on_progress,
+                                should_cancel=should_cancel, dest_dir=dest_dir)
+    except _StalePart:
+        part.unlink(missing_ok=True)
+        return _stream_to_part(client, url, part, token=token, expected_total=expected_total,
+                               on_progress=on_progress, should_cancel=should_cancel,
+                               dest_dir=dest_dir)
+
+
+def _stream_response(
+    client: httpx.Client,
+    url: str,
+    part: Path,
+    existing: int,
+    digest,
+    *,
+    token: str | None,
+    expected_total: int,
+    on_progress: ProgressFn | None,
+    should_cancel: CancelFn | None,
+    dest_dir: Path,
+) -> tuple[int, str]:
     with client.stream("GET", url, headers=_headers(existing, token)) as response:
         if existing and response.status_code == 200:
             # The server ignored our Range and is sending the whole file again.
             existing, digest = 0, hashlib.sha256()
             part.unlink(missing_ok=True)
         elif existing and response.status_code == 416:
-            # Already have everything the server has.
+            # Either we already have everything the server has, or we have
+            # *more* than it has -- and only the size tells those apart.
+            total = expected_total or _total_from_416(response)
+            if total and existing != total:
+                raise _StalePart()
             return existing, digest.hexdigest()
         elif response.status_code not in (200, 206):
             raise DownloadError(
@@ -226,7 +271,12 @@ def download_file(
     if dest.exists() and sha256 and file_digest(dest) == sha256:
         return sha256  # already here and verified; nothing to do
 
-    check_space(dest.parent, size_bytes or remote_size(url, token=token, client=client))
+    # Room for what is still to come, not for the whole file: a resume with
+    # 30 of 40 GB already on disk needs 10, and demanding 40 refused exactly
+    # the machines that had made the most progress.
+    already = part.stat().st_size if part.exists() else 0
+    total = size_bytes or remote_size(url, token=token, client=client)
+    check_space(dest.parent, max(0, total - already))
 
     owned = client is None
     client = client or httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30.0, read=120.0))
@@ -257,6 +307,9 @@ def download_file(
                         reason_key="checksum_mismatch")
                     continue
                 if size_bytes and written != size_bytes:
+                    # Discard it: resuming onto the wrong length can only
+                    # produce the wrong length again, five times over.
+                    part.unlink(missing_ok=True)
                     last = DownloadError(
                         f"{dest.name} is {written} bytes, expected {size_bytes}.",
                         reason_key="short_file")

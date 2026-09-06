@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from toolshed.exec.download import download_file
+from toolshed.exec.download import CancelFn, download_file
 from toolshed.exec.proc import Result, run
 
 UV_VERSION = "0.12.10"
@@ -46,7 +46,8 @@ def uv_path(runtime_dir: Path) -> Path:
     return runtime_dir / "uv" / ("uv.exe" if sys.platform == "win32" else "uv")
 
 
-def ensure_uv(runtime_dir: Path, *, log: LogFn | None = None) -> Path:
+def ensure_uv(runtime_dir: Path, *, log: LogFn | None = None,
+              should_cancel: CancelFn | None = None) -> Path:
     """Download and unpack uv if it is not already there."""
     target = uv_path(runtime_dir)
     if target.is_file():
@@ -56,7 +57,7 @@ def ensure_uv(runtime_dir: Path, *, log: LogFn | None = None) -> Path:
     archive = runtime_dir / "uv" / asset
     if log:
         log(f"Fetching uv {UV_VERSION}")
-    download_file(f"{UV_BASE}/{asset}", archive)
+    download_file(f"{UV_BASE}/{asset}", archive, should_cancel=should_cancel)
 
     extract_to = archive.parent
     if asset.endswith(".zip"):
@@ -93,10 +94,16 @@ def uv_env(runtime_dir: Path) -> dict[str, str]:
 
 
 def install_python(
-    uv: Path, runtime_dir: Path, version: str, *, log: LogFn | None = None
+    uv: Path, runtime_dir: Path, version: str, *, log: LogFn | None = None,
+    should_cancel: CancelFn | None = None,
 ) -> Result:
-    return run([uv, "python", "install", version],
-               env=uv_env(runtime_dir), timeout=900, on_line=log)
+    # --no-bin: without it uv also drops a `python3.12` launcher into
+    # ~/.local/bin, outside the data root. Nothing of ours belongs there --
+    # it would shadow a Python the user installed themselves, and uninstall
+    # would not know to remove it.
+    return run([uv, "python", "install", "--no-bin", version],
+               env=uv_env(runtime_dir), timeout=900, on_line=log,
+               should_cancel=should_cancel)
 
 
 def create_venv(
@@ -106,6 +113,7 @@ def create_venv(
     *,
     clear: bool = False,
     log: LogFn | None = None,
+    should_cancel: CancelFn | None = None,
 ) -> Result:
     """Create the virtual environment the engine runs in.
 
@@ -123,7 +131,8 @@ def create_venv(
     if clear:
         cmd.append("--clear")
     cmd.append(str(runtime_dir / "venv"))
-    return run(cmd, env=uv_env(runtime_dir), timeout=600, on_line=log)
+    return run(cmd, env=uv_env(runtime_dir), timeout=600, on_line=log,
+               should_cancel=should_cancel)
 
 
 def venv_python(runtime_dir: Path) -> Path:
@@ -163,6 +172,7 @@ def pip_install(
     index_url: str | None = None,
     log: LogFn | None = None,
     timeout: float = 1800,
+    should_cancel: CancelFn | None = None,
 ) -> Result:
     """Install into our venv.
 
@@ -175,7 +185,8 @@ def pip_install(
     if index_url:
         cmd += ["--index-url", index_url]
     cmd += packages
-    return run(cmd, env=uv_env(runtime_dir), timeout=timeout, on_line=log)
+    return run(cmd, env=uv_env(runtime_dir), timeout=timeout, on_line=log,
+               should_cancel=should_cancel)
 
 
 # Reports the name of device 0 as well as the count, because the count alone
@@ -203,8 +214,21 @@ class TorchCheck:
     warning: str = ""
 
 
-def verify_torch(runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None) -> TorchCheck:
+def verify_torch(
+    runtime_dir: Path,
+    expect_tag: str,
+    *,
+    env: dict[str, str] | None = None,
+    log: LogFn | None = None,
+    should_cancel: CancelFn | None = None,
+) -> TorchCheck:
     """Prove the graphics card is really usable before downloading 40 GB.
+
+    ``env`` is whatever the installer decided PyTorch needs to see the card --
+    the HSA_OVERRIDE_GFX_VERSION for AMD cards ROCm does not list. Probing
+    without it would report "cannot see your graphics card" on exactly the
+    machines the override exists for, and stop an install that would have
+    worked.
 
     Catching a CPU-only build here costs ninety seconds. Catching it after the
     models costs an hour and the user's patience. That -- and only that -- is
@@ -220,7 +244,8 @@ def verify_torch(runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None
     at 26 percent. A check that is stricter than the thing it protects against
     does not make the install safer, it just makes it fail.
     """
-    result = run([venv_python(runtime_dir), "-c", TORCH_PROBE], timeout=300, on_line=log)
+    result = run([venv_python(runtime_dir), "-c", TORCH_PROBE], timeout=300, on_line=log,
+                 env=env, should_cancel=should_cancel)
     if not result.ok:
         return TorchCheck(False, "PyTorch could not be loaded at all.")
 

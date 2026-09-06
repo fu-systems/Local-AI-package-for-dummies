@@ -29,15 +29,17 @@ OBJECT_INFO = {
     # nodes.py, class KSampler
     "KSampler": {"input": {"required": {
         "model": ["MODEL", {}],
-        "seed": ["INT", {"default": 0, "control_after_generate": True}],
-        "steps": ["INT", {"default": 20}],
-        "cfg": ["FLOAT", {"default": 8.0}],
+        "seed": ["INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF,
+                         "control_after_generate": True}],
+        "steps": ["INT", {"default": 20, "min": 1, "max": 10000}],
+        "cfg": ["FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0,
+                          "step": 0.1, "round": 0.01}],
         "sampler_name": [["euler", "dpmpp_2m", "res_multistep"], {}],
         "scheduler": [["normal", "karras", "simple"], {}],
         "positive": ["CONDITIONING", {}],
         "negative": ["CONDITIONING", {}],
         "latent_image": ["LATENT", {}],
-        "denoise": ["FLOAT", {"default": 1.0}],
+        "denoise": ["FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}],
     }}, "output": ["LATENT"]},
     # nodes.py, class CLIPTextEncode -- text comes before clip
     "CLIPTextEncode": {"input": {"required": {
@@ -50,9 +52,9 @@ OBJECT_INFO = {
     }}, "output": ["MODEL", "CLIP", "VAE"]},
     # nodes.py, class EmptyLatentImage
     "EmptyLatentImage": {"input": {"required": {
-        "width": ["INT", {"default": 512}],
-        "height": ["INT", {"default": 512}],
-        "batch_size": ["INT", {"default": 1}],
+        "width": ["INT", {"default": 512, "min": 16, "max": 16384, "step": 8}],
+        "height": ["INT", {"default": 512, "min": 16, "max": 16384, "step": 8}],
+        "batch_size": ["INT", {"default": 1, "min": 1, "max": 4096}],
     }}, "output": ["LATENT"]},
     # nodes.py, class VAEDecode
     "VAEDecode": {"input": {"required": {
@@ -84,14 +86,19 @@ OBJECT_INFO = {
     }}, "output": ["CONDITIONING"]},
     # comfy_extras/nodes_sd3.py, class EmptySD3LatentImage
     "EmptySD3LatentImage": {"input": {"required": {
-        "width": ["INT", {"default": 1024}],
-        "height": ["INT", {"default": 1024}],
-        "batch_size": ["INT", {"default": 1}],
+        "width": ["INT", {"default": 1024, "min": 16, "max": 16384, "step": 16}],
+        "height": ["INT", {"default": 1024, "min": 16, "max": 16384, "step": 16}],
+        "batch_size": ["INT", {"default": 1, "min": 1, "max": 4096}],
     }}, "output": ["LATENT"]},
+    # nodes.py, class LoadImage -- a combo of the files already in the input
+    # directory, marked image_upload so the editor offers an upload button.
+    "LoadImage": {"input": {"required": {
+        "image": [["viking_wolf_rune_axe.png", "example.png"], {"image_upload": True}],
+    }}, "output": ["IMAGE", "MASK"]},
     # comfy_extras/nodes_model_advanced.py, class ModelSamplingAuraFlow
     "ModelSamplingAuraFlow": {"input": {"required": {
         "model": ["MODEL", {}],
-        "shift": ["FLOAT", {"default": 1.73}],
+        "shift": ["FLOAT", {"default": 1.73, "min": 0.0, "max": 100.0, "step": 0.01}],
     }}, "output": ["MODEL"]},
 }
 

@@ -61,6 +61,7 @@ class InstallWorker(QtCore.QThread):
 class InstallPage(QtWidgets.QWidget):
     done = QtCore.Signal()
     failed = QtCore.Signal(str, str)
+    stopped = QtCore.Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -153,13 +154,36 @@ class InstallPage(QtWidgets.QWidget):
         self.worker.event.connect(self._on_event)
         self.worker.finished_ok.connect(self.done)
         self.worker.failed.connect(self.failed)
-        self.worker.cancelled.connect(lambda: self.current.setText("Stopped."))
+        self.worker.cancelled.connect(self._on_cancelled)
         self.worker.start()
 
     def stop(self) -> None:
         if self.worker and self.worker.isRunning():
             self.current.setText("Stopping… your progress is kept.")
             self.worker.stop()
+
+    def shutdown(self, wait_ms: int = 30_000) -> bool:
+        """Stop the worker and wait for it, before this page can go away.
+
+        Qt aborts the whole process if a QThread is destroyed while it is
+        still running, so closing the window mid-install must first ask the
+        runner to stop and give it time to. Everything it was doing is safe to
+        interrupt: downloads keep their .part, subprocesses are killed as a
+        tree, and every step picks up where it left off next time.
+        """
+        if self.worker is None or not self.worker.isRunning():
+            return True
+        self.worker.stop()
+        return self.worker.wait(wait_ms)
+
+    def _on_cancelled(self) -> None:
+        """Stopping is a place to carry on from, and the screen must say so.
+
+        This used to change one label to "Stopped." and leave a Stop button
+        that no longer did anything: no way to try again, no way to close.
+        """
+        self.current.setText("Stopped.")
+        self.stopped.emit()
 
     def _on_event(self, event: Event) -> None:
         if event.kind == "log":

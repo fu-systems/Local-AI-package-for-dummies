@@ -32,7 +32,7 @@ No part of ComfyUI is imported.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +59,49 @@ class ConversionError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class InputSpec:
+    """One input, as the engine describes it.
+
+    The options are kept, not just the type. They are what lets a settings
+    screen show a slider with the right bounds, a dropdown with the real
+    choices and a multi-line box for a prompt -- all of it from the engine's
+    own description, so a node we have never heard of still gets sensible
+    controls.
+    """
+
+    name: str
+    type: Any                          # "INT", "STRING", ... or a list of choices
+    options: dict = field(default_factory=dict)
+
+    @property
+    def is_widget(self) -> bool:
+        return _is_widget(self.type)
+
+    @property
+    def choices(self) -> tuple[str, ...]:
+        if isinstance(self.type, list):
+            return tuple(str(c) for c in self.type)
+        if self.type == "COMBO":
+            return tuple(str(c) for c in (self.options.get("options") or ()))
+        return ()
+
+    @property
+    def kind(self) -> str:
+        """What sort of control this wants."""
+        if self.choices:
+            return "choice"
+        if self.type == "BOOLEAN":
+            return "bool"
+        if self.type == "FLOAT":
+            return "float"
+        if self.type == "INT":
+            return "int"
+        if self.type == "STRING":
+            return "text" if self.options.get("multiline") else "string"
+        return "wired"                 # arrives down a link, not typed in
+
+
+@dataclass(frozen=True)
 class NodeSpec:
     """What the engine says a node class accepts."""
 
@@ -66,16 +109,24 @@ class NodeSpec:
     inputs: tuple[str, ...]          # every valid backend input, in order
     widget_slots: tuple[str, ...]    # the editor's widget order, with synthetics
     output_types: tuple[str, ...] = ()
+    specs: tuple[InputSpec, ...] = ()
 
     @property
     def input_set(self) -> frozenset[str]:
         return frozenset(self.inputs)
 
+    def spec_for(self, input_name: str) -> InputSpec | None:
+        return next((s for s in self.specs if s.name == input_name), None)
+
 
 def _is_widget(type_: Any) -> bool:
     if isinstance(type_, list):
-        return True                      # a combo: a list of choices
-    return type_ in SCALAR_WIDGET_TYPES
+        return True                      # a V1 combo: a list of choices
+    # A V3 node (comfy_api.latest, io.Combo) reports the string "COMBO" and puts
+    # its choices under options["options"]. TRELLIS.2, the mesh nodes and
+    # SaveVideo are all V3, so treating this as a wired input dropped every one
+    # of their dropdown values and broke the 3D and video graphs outright.
+    return type_ == "COMBO" or type_ in SCALAR_WIDGET_TYPES
 
 
 def specs_from_object_info(doc: dict) -> dict[str, NodeSpec]:
@@ -93,13 +144,16 @@ def specs_from_object_info(doc: dict) -> dict[str, NodeSpec]:
 
         names: list[str] = []
         slots: list[str] = []
+        details: list[InputSpec] = []
         for input_name, definition in ordered:
             names.append(input_name)
             if not isinstance(definition, (list, tuple)) or not definition:
+                details.append(InputSpec(input_name, None, {}))
                 continue
             type_ = definition[0]
             options = definition[1] if len(definition) > 1 and isinstance(
                 definition[1], dict) else {}
+            details.append(InputSpec(input_name, type_, options))
             if _is_widget(type_):
                 slots.append(input_name)
                 if options.get("control_after_generate"):
@@ -110,6 +164,7 @@ def specs_from_object_info(doc: dict) -> dict[str, NodeSpec]:
             inputs=tuple(names),
             widget_slots=tuple(slots),
             output_types=tuple(info.get("output") or ()),
+            specs=tuple(details),
         )
     return specs
 
@@ -299,7 +354,11 @@ def to_api(workflow: dict, specs: dict[str, NodeSpec]) -> dict[str, dict]:
 
     # Stable, simple ids. The uids carry colons from subgraph nesting and there
     # is no reason to make the engine's error messages harder to read.
-    numbering = {uid: str(i + 1) for i, uid in enumerate(flat.placed)}
+    # Only nodes the engine knows get a number. A frontend-only node such as
+    # the editor's PrimitiveNode is dropped below, so a link from it must not
+    # resolve to an id the engine will never see.
+    numbering = {uid: str(i + 1) for i, uid in enumerate(flat.placed)
+                 if placed_spec(specs, flat.placed[uid]) is not None}
 
     prompt: dict[str, dict] = {}
     for uid, placed in flat.placed.items():
@@ -317,9 +376,12 @@ def to_api(workflow: dict, specs: dict[str, NodeSpec]) -> dict[str, dict]:
             if isinstance(resolved, Ref):
                 target = numbering.get(resolved.uid)
                 if target is None:
-                    # Points at something dropped; leave the input unset and
-                    # let the engine say so, rather than sending a dangling id.
-                    inputs.pop(name, None)
+                    # The source is a node the engine does not have -- the
+                    # editor's PrimitiveNode feeding a widget, typically. The
+                    # editor writes that value into the target's own widget on
+                    # save, so the right thing is to keep the widget value
+                    # already in `inputs`, not to delete it. Deleting it turned
+                    # "Make music" into required_input_missing on first press.
                     continue
                 inputs[name] = [target, resolved.slot]
             elif resolved is not None:
@@ -334,6 +396,10 @@ def to_api(workflow: dict, specs: dict[str, NodeSpec]) -> dict[str, dict]:
     if not prompt:
         raise ConversionError("the workflow has no nodes the engine can run")
     return prompt
+
+
+def placed_spec(specs: dict[str, NodeSpec], placed: _Placed) -> NodeSpec | None:
+    return specs.get(placed.node.get("type"))
 
 
 def _widget_inputs(node: dict, spec: NodeSpec) -> dict[str, Any]:
