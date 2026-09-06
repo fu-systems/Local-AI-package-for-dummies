@@ -68,6 +68,8 @@ def _tiny_png() -> bytes:
 
 
 PICTURE_BYTES = _tiny_png()
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKFLOWS = REPO_ROOT / "workflows"
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -716,11 +718,29 @@ class TestEverySettingIsReachable:
         assert ("2", "width") not in offered, "offered a box for a value the engine ignores"
         assert ("2", "height") in offered, "the unwired ones should still be offered"
 
-    def test_model_filenames_are_never_offered(self):
-        """They are decided by the pack that was installed, and every other
-        value the engine would accept belongs to a pack you do not have."""
+    def test_model_filenames_are_offered_as_a_choice(self):
+        """These were hidden on the reasoning that the pack decided them. That
+        was removing a function rather than defaulting one -- the engine builds
+        the list from the files actually on disk, so every option is a model
+        the user has, and switching checkpoint is one of the first things
+        anyone wants to try."""
         _, knobs = self._knobs()
-        assert not any(c.input_name == "ckpt_name" for c in knobs.controls)
+        checkpoint = next(c for c in knobs.advanced if c.input_name == "ckpt_name")
+        assert checkpoint.kind == "choice"
+        assert checkpoint.choices
+        assert checkpoint.default == "sd_xl_base_1.0.safetensors"
+
+    def test_the_only_thing_withheld_is_not_an_input_at_all(self):
+        """control_after_generate is invented by the editor to sit beside a
+        seed. The engine has never heard of it."""
+        _, knobs = self._knobs()
+        assert not any(c.input_name == "control_after_generate" for c in knobs.controls)
+
+    def test_every_control_remembers_what_it_started_as(self):
+        """Which is what lets the screen say that leaving it alone is fine,
+        and put it back when it is not."""
+        _, knobs = self._knobs()
+        assert all(c.default is not None for c in knobs.advanced)
 
     def test_the_named_controls_are_not_repeated_in_the_list(self):
         """Showing the prompt twice invites setting it in both places and
@@ -789,15 +809,31 @@ class TestThePictureBoxOnScreen:
         finally:
             page.shutdown()
 
-    def test_it_will_not_run_until_one_is_chosen(self, qapp_easy, engine, tmp_path):
-        """Running it unchanged would ask the engine for the template's own
-        filename, which is on nobody else's machine."""
+    def test_it_runs_without_choosing_anything(self, qapp_easy, engine, tmp_path):
+        """Easy mode means the button always works.
+
+        This used to leave the button unpressable until a picture was chosen,
+        which is the opposite of the point. A picture ships with Toolshed and
+        is filled in, so pressing the button makes something -- the template's
+        own sample filename, which is on nobody else's machine, never gets
+        asked for.
+        """
         page = self._page(tmp_path, IMAGE_WORKFLOW)
         try:
             assert self._inspected(page, engine)
-            assert not page.go.isEnabled()
-            assert "starting picture" in page.status.text()
-            assert page.go.toolTip()
+            assert page.go.isEnabled(), "the button was not pressable out of the box"
+            assert page.picture is not None, "no starting picture was filled in"
+            assert page.picture.is_file()
+        finally:
+            page.shutdown()
+
+    def test_the_filled_in_picture_says_it_is_a_default(self, qapp_easy, engine,
+                                                        tmp_path):
+        """Optional is only useful if it is understood as optional."""
+        page = self._page(tmp_path, IMAGE_WORKFLOW)
+        try:
+            assert self._inspected(page, engine)
+            assert "came with Toolshed" in page.picture_name.text()
         finally:
             page.shutdown()
 
@@ -817,15 +853,21 @@ class TestThePictureBoxOnScreen:
         finally:
             page.shutdown()
 
-    def test_clearing_it_blocks_again(self, qapp_easy, engine, tmp_path):
+    def test_clearing_returns_to_the_starter_rather_than_to_nothing(
+            self, qapp_easy, engine, tmp_path):
+        """There is no state in which the button stops working."""
         page = self._page(tmp_path, IMAGE_WORKFLOW)
         try:
             assert self._inspected(page, engine)
             photo = tmp_path / "p.png"
             photo.write_bytes(PICTURE_BYTES)
             page.set_picture(photo)
+            assert page.picture == photo
+
             page.clear_picture()
-            assert not page.go.isEnabled()
+            assert page.picture is not None
+            assert page.go.isEnabled()
+            assert "came with Toolshed" in page.picture_name.text()
         finally:
             page.shutdown()
 
@@ -858,8 +900,8 @@ class TestThePictureBoxOnScreen:
         try:
             assert self._inspected(page, engine)
             names = {row.control.input_name for row in page.rows}
-            assert {"cfg", "sampler_name", "scheduler", "denoise"} <= names
-            assert "ckpt_name" not in names
+            assert {"cfg", "sampler_name", "scheduler", "denoise", "ckpt_name"} <= names
+            assert "control_after_generate" not in names
             assert page.settings().overrides, "nothing would be sent"
         finally:
             page.shutdown()
@@ -875,3 +917,124 @@ class TestThePictureBoxOnScreen:
         page.shutdown()
         assert page.inspector is None
         assert isinstance(page, MakePage)
+
+
+class TestPressingGoWithoutTouchingAnything:
+    """Easy mode's one promise: the button works, always.
+
+    Every workflow we ship, straight after being picked, with nothing typed
+    and nothing opened, must produce a graph the engine would accept.
+    """
+
+    def _page(self, tmp_path, rel, pack):
+        from toolshed.ui.make import MakePage, Recipe
+
+        page = MakePage(tmp_path / "root")
+        page.recipes = [Recipe(pack, "whatever", WORKFLOWS / rel)]
+        page.what.addItem(page.recipes[0].name)
+        return page
+
+    def test_the_starter_picture_is_shipped_and_is_a_real_image(self):
+        from toolshed.ui.make import starter_picture
+
+        starter = starter_picture()
+        assert starter is not None and starter.is_file()
+        assert starter.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+        pixmap = QtWidgets.QApplication.instance() and None
+        del pixmap
+        from PySide6 import QtGui
+        image = QtGui.QImage(str(starter))
+        assert not image.isNull(), "the starter picture does not decode"
+        assert image.width() >= 256, "too small to be a useful subject"
+
+    def test_it_is_bundled_into_the_build(self):
+        """A resource the frozen app cannot find is not shipped at all."""
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "packaging"))
+        from _spec_common import DATA_DIRS
+
+        assert "assets" in DATA_DIRS
+
+    def test_the_defaults_alone_produce_a_runnable_graph(self):
+        """Nothing typed, nothing opened: what would be sent?"""
+        for rel in ["image/02 Text to picture (SDXL).json",
+                    "image/01 Text to picture (Z-Image).json"]:
+            prompt = to_api(load_workflow(rel), OBJECT_INFO_SPECS)
+            knobs = analyse(prompt, OBJECT_INFO_SPECS)
+            graph = apply(prompt, knobs, Settings())
+
+            assert graph, rel
+            for node_id, node in graph.items():
+                for name, value in node["inputs"].items():
+                    assert value is not None, f"{rel}: {node['class_type']}.{name} is unset"
+                    if isinstance(value, list) and len(value) == 2:
+                        assert value[0] in graph, f"{rel}: {name} points nowhere"
+                assert node_id
+
+    def test_an_untouched_settings_panel_changes_nothing(self, qapp_easy, engine,
+                                                         tmp_path):
+        """Opening the panel and closing it again must not alter the result."""
+        page = self._page(tmp_path, "image/02 Text to picture (SDXL).json", "image.sdxl")
+        try:
+            import time
+
+            from toolshed.exec.comfy_api import ComfyClient
+            page.set_engine(ComfyClient(base_url=engine.url))
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and page.knobs is None:
+                QtWidgets.QApplication.processEvents()
+                time.sleep(0.02)
+            assert page.knobs is not None
+
+            prompt = to_api(load_workflow("image/02 Text to picture (SDXL).json"),
+                            OBJECT_INFO_SPECS)
+            knobs = analyse(prompt, OBJECT_INFO_SPECS)
+            untouched = apply(prompt, knobs, page.settings())
+
+            for row in page.rows:
+                node = untouched[row.control.node_id]["inputs"]
+                assert node[row.control.input_name] == row.control.default, \
+                    f"{row.control.input_name} changed just by being shown"
+        finally:
+            page.shutdown()
+
+    def test_reset_puts_everything_back(self, qapp_easy, engine, tmp_path):
+        page = self._page(tmp_path, "image/02 Text to picture (SDXL).json", "image.sdxl")
+        try:
+            import time
+
+            from toolshed.exec.comfy_api import ComfyClient
+            page.set_engine(ComfyClient(base_url=engine.url))
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and page.knobs is None:
+                QtWidgets.QApplication.processEvents()
+                time.sleep(0.02)
+            assert page.rows
+
+            for row in page.rows:
+                if row.control.input_name == "cfg":
+                    row.widget.setValue(99.0)
+                if row.control.input_name == "sampler_name":
+                    row.widget.setCurrentText("euler")
+            page.negative.setText("blurry")
+            page.width.setValue(512)
+
+            page.reset_settings()
+
+            for row in page.rows:
+                assert row.value() == row.control.default or \
+                    str(row.value()) == str(row.control.default), row.control.input_name
+            assert page.negative.text() == ""
+        finally:
+            page.shutdown()
+
+    def test_the_panel_says_it_is_optional(self, qapp_easy, tmp_path):
+        from toolshed.ui.make import MakePage
+
+        page = MakePage(tmp_path / "root")
+        try:
+            assert "optional" in page.all_settings.title().lower()
+        finally:
+            page.shutdown()

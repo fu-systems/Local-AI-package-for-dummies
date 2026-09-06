@@ -58,8 +58,19 @@ PLACEHOLDER = {
 NOT_READY_MESSAGES = frozenset({
     "Start ComfyUI first — it does the actual work.",
     "Nothing installed yet that easy mode can drive.",
-    "Choose a starting picture to work from.",
 })
+
+
+def starter_picture() -> Path | None:
+    """The picture shipped with Toolshed, for workflows that need one to begin.
+
+    Easy mode has to work on the first press of the button. A workflow that
+    starts from a photo used to leave the button unpressable until one was
+    chosen, which is the opposite of the point -- the whole idea is that
+    everything already has an answer and you change the ones you care about.
+    """
+    path = resources.resource_path("assets", "starter-photo.png")
+    return path if path.is_file() else None
 
 
 @dataclass(frozen=True)
@@ -185,6 +196,23 @@ class ControlRow:
         box = QtWidgets.QLineEdit()
         box.setText("" if control.value is None else str(control.value))
         return box
+
+    def reset(self) -> None:
+        """Back to the value the workflow shipped with."""
+        widget = self.widget
+        default = self.control.default
+        if isinstance(widget, QtWidgets.QComboBox):
+            if default is not None and str(default) in self.control.choices:
+                widget.setCurrentText(str(default))
+        elif isinstance(widget, QtWidgets.QCheckBox):
+            widget.setChecked(bool(default))
+        elif isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+            if isinstance(default, (int, float)):
+                widget.setValue(type(widget.value())(default))
+        elif isinstance(widget, QtWidgets.QPlainTextEdit):
+            widget.setPlainText("" if default is None else str(default))
+        else:
+            widget.setText("" if default is None else str(default))
 
     def value(self):
         widget = self.widget
@@ -319,7 +347,7 @@ class MakePage(QtWidgets.QWidget):
         self.picture_name.setWordWrap(True)
         self.picture_button = QtWidgets.QPushButton("Choose a picture…")
         self.picture_button.clicked.connect(self.choose_picture)
-        self.picture_clear = QtWidgets.QPushButton("Clear")
+        self.picture_clear = QtWidgets.QPushButton("Use the one that came with Toolshed")
         self.picture_clear.clicked.connect(self.clear_picture)
         self.picture_thumb = QtWidgets.QLabel()
         self.picture_thumb.setFixedSize(64, 64)
@@ -333,7 +361,7 @@ class MakePage(QtWidgets.QWidget):
         layout.addWidget(self.picture_row)
 
         # Everything most people never need, out of the way but not hidden.
-        self.more = QtWidgets.QGroupBox("More settings")
+        self.more = QtWidgets.QGroupBox("Common settings — optional")
         self.more.setCheckable(True)
         self.more.setChecked(False)
         form = QtWidgets.QFormLayout(self.more)
@@ -375,10 +403,22 @@ class MakePage(QtWidgets.QWidget):
         # about each input. Collapsed by default: it is the difference between
         # easy mode being a toy and being usable, but it is not the first
         # thing a beginner should meet.
-        self.all_settings = QtWidgets.QGroupBox("All settings")
+        self.all_settings = QtWidgets.QGroupBox("All settings — optional")
         self.all_settings.setCheckable(True)
         self.all_settings.setChecked(False)
         outer = QtWidgets.QVBoxLayout(self.all_settings)
+        blurb = QtWidgets.QLabel(
+            "Everything here already has a working value. You never have to open "
+            "this — press the button and it makes something. Change anything you "
+            "are curious about; Reset puts it all back.")
+        blurb.setWordWrap(True)
+        outer.addWidget(blurb)
+        self.reset_button = QtWidgets.QPushButton("Reset to the defaults")
+        self.reset_button.clicked.connect(self.reset_settings)
+        reset_row = QtWidgets.QHBoxLayout()
+        reset_row.addWidget(self.reset_button)
+        reset_row.addStretch(1)
+        outer.addLayout(reset_row)
         self.settings_area = QtWidgets.QScrollArea()
         self.settings_area.setWidgetResizable(True)
         self.settings_area.setMinimumHeight(180)
@@ -493,6 +533,10 @@ class MakePage(QtWidgets.QWidget):
         # A workflow with no text encoder has nothing to do with a prompt box.
         self.prompt.setVisible(knobs.takes_text)
         self.picture_row.setVisible(knobs.takes_picture)
+        if knobs.takes_picture and self.picture is None:
+            starter = starter_picture()
+            if starter is not None:
+                self.set_picture(starter, is_starter=True)
         self.negative.setEnabled(bool(knobs.negative))
         self.size_row_widget.setEnabled(knobs.has_size)
         size = knobs.current_size
@@ -512,9 +556,26 @@ class MakePage(QtWidgets.QWidget):
             self.rows.append(row)
             self.settings_form.addRow(control.label, row.widget)
 
-        self.all_settings.setTitle(f"All settings ({len(self.rows)})")
+        self.all_settings.setTitle(f"All settings — optional ({len(self.rows)})")
         self.all_settings.setVisible(bool(self.rows))
         self._sync()
+
+    def reset_settings(self) -> None:
+        """Put every control back to what the workflow shipped with.
+
+        The safety net that makes the panel safe to explore: nothing in here
+        can be got so wrong that the button stops working.
+        """
+        for row in self.rows:
+            row.reset()
+        self.width.setValue(0)
+        self.height.setValue(0)
+        self.negative.clear()
+        self.same_seed.setChecked(False)
+        if self.knobs is not None:
+            size = self.knobs.current_size
+            if size:
+                self._on_analysed(*size)
 
     # -- the starting picture -------------------------------------------------
 
@@ -525,9 +586,12 @@ class MakePage(QtWidgets.QWidget):
         if chosen:
             self.set_picture(Path(chosen))
 
-    def set_picture(self, path: Path) -> None:
+    def set_picture(self, path: Path, *, is_starter: bool = False) -> None:
         self.picture = path
-        self.picture_name.setText(path.name)
+        self.picture_name.setText(
+            "the one that came with Toolshed — swap it for your own"
+            if is_starter else path.name)
+        self.picture_clear.setVisible(not is_starter)
         thumb = QtGui.QPixmap(str(path))
         if not thumb.isNull():
             self.picture_thumb.setPixmap(thumb.scaled(
@@ -537,6 +601,11 @@ class MakePage(QtWidgets.QWidget):
         self._sync()
 
     def clear_picture(self) -> None:
+        """Back to the picture that came with Toolshed, never to nothing."""
+        starter = starter_picture()
+        if starter is not None:
+            self.set_picture(starter, is_starter=True)
+            return
         self.picture = None
         self.picture_name.setText("none chosen")
         self.picture_thumb.clear()
@@ -545,15 +614,6 @@ class MakePage(QtWidgets.QWidget):
     def _sync(self) -> None:
         busy = self.worker is not None and self.worker.isRunning()
         ready = self.client is not None and bool(self.recipes) and not busy
-
-        # A workflow that starts from a picture cannot start without one. The
-        # button says why rather than failing on click.
-        needs_picture = bool(self.knobs and self.knobs.takes_picture and not self.picture)
-        if needs_picture:
-            ready = False
-            self.go.setToolTip("Choose a starting picture first.")
-        else:
-            self.go.setToolTip("")
 
         self.go.setEnabled(ready)
 
@@ -566,8 +626,6 @@ class MakePage(QtWidgets.QWidget):
             blocked = "Start ComfyUI first — it does the actual work."
         elif not self.recipes:
             blocked = "Nothing installed yet that easy mode can drive."
-        elif needs_picture:
-            blocked = "Choose a starting picture to work from."
 
         if blocked:
             self.status.setText(blocked)

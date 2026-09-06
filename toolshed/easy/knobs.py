@@ -29,17 +29,17 @@ from typing import Any
 SEED_MAX = 0xFFFFFFFFFFFFFFFF
 
 
-# Inputs a settings screen must never offer. Editing them would either break
-# the graph or waste the user's time.
-NEVER_OFFER = frozenset({
-    # The editor's synthetic seed companion; not a backend input at all.
-    "control_after_generate",
-    # Model filenames. They are chosen by the pack that was installed, and the
-    # only other values the engine would accept are other packs' files.
-    "ckpt_name", "unet_name", "vae_name", "clip_name", "lora_name",
-    "model_name", "bg_removal_name", "style_model_name", "control_net_name",
-    "upscale_model_name", "clip_vision_name", "audio_encoder_name",
-})
+# The only thing a settings screen must never offer, because it is not an
+# input at all: the editor invents this widget to sit beside a seed, and the
+# engine would reject it.
+#
+# Model filenames used to be here too, on the reasoning that the pack decided
+# them. That was removing a function rather than defaulting one. The engine
+# builds that dropdown from the files actually on disk, so every choice in it
+# is a model the user has -- and being able to switch checkpoint is one of the
+# first things anyone wants. Easy mode means nothing has to be touched, not
+# that nothing can be.
+NEVER_OFFER = frozenset({"control_after_generate"})
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,9 @@ class Control:
     step: float | None = None
     tooltip: str = ""
     role: str = ""                     # prompt | negative | width | ... | ""
+    # What it was before anyone touched it. Kept so the screen can say what
+    # leaving it alone means, and put it back.
+    default: Any = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -282,6 +285,7 @@ def _controls(prompt: dict[str, dict], specs: dict, knobs: Knobs) -> list[Contro
                 step=options.get("step"),
                 tooltip=str(options.get("tooltip") or ""),
                 role=roles.get((node_id, name), ""),
+                default=value if value is not None else options.get("default"),
             ))
     return found
 
