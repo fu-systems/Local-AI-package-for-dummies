@@ -70,6 +70,17 @@ FAKE_ENGINE = textwrap.dedent('''
         sys.stdout.flush()
         raise SystemExit(1)
 
+    if mode == "abort":
+        # Come up, serve, then die the way a GPU page fault does: SIGABRT,
+        # after the engine was already running and answering.
+        import signal, threading
+        def kill_later():
+            time.sleep(float(os.environ.get("FAKE_DELAY", "1.5")))
+            print("Memory access fault by GPU node-1 (Agent handle: 0x4c8bb460)")
+            sys.stdout.flush()
+            os.kill(os.getpid(), signal.SIGABRT)
+        threading.Thread(target=kill_later, daemon=True).start()
+
     if mode == "slow":
         time.sleep(float(os.environ.get("FAKE_DELAY", "2")))
 
@@ -376,3 +387,67 @@ class TestExtraFlags:
         source = (Path(__file__).resolve().parents[2]
                   / "toolshed" / "exec" / "engine.py").read_text()
         assert "shell=True" not in source
+
+
+class TestTheEngineDyingWhileRunning:
+    """A GPU driver fault kills ComfyUI mid-generation with SIGABRT.
+
+    The reported log ends:
+
+        Requested to load BiRefNet
+        Memory access fault by GPU node-1 ... Page not present or supervisor
+        privilege.
+        Fatal Python error: Aborted
+
+    Nothing in the app noticed. The screen went on saying ComfyUI was running,
+    and whatever was waiting on it was waiting on a program that no longer
+    existed. Startup already watched the process; after startup, nothing did.
+    """
+
+    def test_an_engine_that_dies_after_starting_is_reported(self, installed):
+        engine = Engine(root=installed, env={"FAKE_MODE": "abort", "FAKE_DELAY": "1"})
+        deaths: list[str] = []
+        try:
+            engine.start(on_died=deaths.append)
+            engine.wait_until_ready(timeout=30)
+            assert engine.responds(), "it should be up before it dies"
+
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not deaths:
+                time.sleep(0.1)
+
+            assert deaths, "the engine died and nothing noticed"
+            assert "graphics driver" in deaths[0], deaths[0]
+            assert not engine.is_running()
+        finally:
+            engine.stop()
+
+    def test_its_last_words_are_kept(self, installed):
+        engine = Engine(root=installed, env={"FAKE_MODE": "abort", "FAKE_DELAY": "1"})
+        deaths: list[str] = []
+        try:
+            engine.start(on_died=deaths.append)
+            engine.wait_until_ready(timeout=30)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not deaths:
+                time.sleep(0.1)
+            assert "Memory access fault" in engine.tail()
+        finally:
+            engine.stop()
+
+    def test_stopping_it_ourselves_is_not_reported_as_a_death(self, installed):
+        """Otherwise every deliberate Stop would raise a false alarm."""
+        engine = Engine(root=installed)
+        deaths: list[str] = []
+        engine.start(on_died=deaths.append)
+        engine.wait_until_ready(timeout=30)
+        engine.stop()
+        time.sleep(1.0)
+        assert deaths == [], f"stopping it on purpose was reported as a crash: {deaths}"
+
+    def test_the_signal_is_translated_not_shown_as_a_number(self, tmp_path):
+        engine = Engine(root=tmp_path)
+        assert "graphics driver" in engine._explain_exit(-6)
+        assert "running out of memory" in engine._explain_exit(-9)
+        assert "signal 15" in engine._explain_exit(-15)
+        assert "exit code 1" in engine._explain_exit(1)

@@ -73,8 +73,13 @@ def probe(monkeypatch, payload, *, ok=True, extra=""):
     monkeypatch.setattr(uvtool, "run", lambda *a, **k: Result)
 
 
+# The real payload from the reported machine. Note "devices": 2 with one
+# graphics card: ROCm exposes the CPU as an HSA agent, and ComfyUI's own log
+# shows it as
+#     Device: cuda:0 AMD Radeon Graphics
+#     Device: cuda:1 AMD Ryzen 7 7800X3D 8-Core Processor
 WORKING_ROCM = {"version": "2.14.0+rocm7.2", "cuda": None, "hip": "7.2.53211",
-                "available": True, "devices": 2}
+                "available": True, "devices": 2, "name": "AMD Radeon Graphics"}
 
 
 class TestWhatStopsTheInstall:
@@ -82,7 +87,22 @@ class TestWhatStopsTheInstall:
         probe(monkeypatch, WORKING_ROCM)
         check = uvtool.verify_torch(tmp_path, "+rocm7.2")
         assert check.ok and not check.warning
-        assert "2 graphics cards" in check.message
+        assert "AMD Radeon Graphics" in check.message
+
+    def test_the_cpu_is_never_counted_as_a_graphics_card(self, monkeypatch, tmp_path):
+        """torch.cuda.device_count() is 2 on this machine and one of them is a
+        Ryzen. Reporting "2 graphics cards" was wrong, and it sent me on to
+        suggest --cuda-device 1, which selects the processor."""
+        probe(monkeypatch, WORKING_ROCM)
+        message = uvtool.verify_torch(tmp_path, "+rocm7.2").message
+        assert "2 graphics cards" not in message
+        assert "cards" not in message, f"still pluralising a device count: {message}"
+
+    def test_it_falls_back_gracefully_when_the_name_is_missing(self, monkeypatch, tmp_path):
+        probe(monkeypatch, {**WORKING_ROCM, "name": ""})
+        check = uvtool.verify_torch(tmp_path, "+rocm7.2")
+        assert check.ok
+        assert "your graphics card" in check.message
 
     def test_the_exact_reported_case_now_passes(self, monkeypatch, tmp_path):
         """Two cards, ROCm 7.2, torch happy. This must never stop an install

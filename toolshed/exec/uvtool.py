@@ -178,11 +178,19 @@ def pip_install(
     return run(cmd, env=uv_env(runtime_dir), timeout=timeout, on_line=log)
 
 
+# Reports the name of device 0 as well as the count, because the count alone
+# is misleading on ROCm: it exposes the CPU as an HSA agent, so a machine with
+# one Radeon and a Ryzen reports two "devices" and ComfyUI lists them as
+#     Device: cuda:0 AMD Radeon Graphics
+#     Device: cuda:1 AMD Ryzen 7 7800X3D 8-Core Processor
+# Telling someone they have two graphics cards on that basis is wrong, and
+# sends them off setting --cuda-device 1, which selects the processor.
 TORCH_PROBE = (
     "import json,torch;"
     "print(json.dumps({'version':torch.__version__,'cuda':torch.version.cuda,"
     "'hip':getattr(torch.version,'hip',None),'available':torch.cuda.is_available(),"
-    "'devices':torch.cuda.device_count()}))"
+    "'devices':torch.cuda.device_count(),"
+    "'name':(torch.cuda.get_device_name(0) if torch.cuda.device_count() else '')}))"
 )
 
 
@@ -229,9 +237,8 @@ def verify_torch(runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None
         return TorchCheck(False, "PyTorch is installed but cannot see your graphics card.")
 
     version = info.get("version", "")
-    devices = info.get("devices")
-    plural = "" if devices == 1 else "s"
-    good = f"{version} sees {devices} graphics card{plural}."
+    name = (info.get("name") or "").strip()
+    good = f"{version} sees your {name}." if name else f"{version} sees your graphics card."
 
     if expect_tag and expect_tag not in version:
         return TorchCheck(True, good, warning=(

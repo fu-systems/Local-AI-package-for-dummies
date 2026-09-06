@@ -152,6 +152,7 @@ class Engine:
     process: subprocess.Popen | None = None
     _log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINES_KEPT))
     _reader: threading.Thread | None = None
+    _stopping: bool = False
 
     @property
     def layout(self) -> Layout:
@@ -191,7 +192,16 @@ class Engine:
 
     # -- lifecycle ----------------------------------------------------------
 
-    def start(self, *, on_line: LogFn | None = None) -> None:
+    def start(self, *, on_line: LogFn | None = None,
+              on_died: Callable[[str], None] | None = None) -> None:
+        """Launch the engine.
+
+        ``on_died`` is called if it exits without being asked to. That is not a
+        rare case to be tidy about: a GPU driver fault takes the whole process
+        down mid-generation with SIGABRT, and without this the app goes on
+        saying "ComfyUI is running" over a program that is gone, while whatever
+        was waiting on it waits for a reply that will never come.
+        """
         missing = self.layout.missing_pieces()
         if missing:
             raise EngineError(
@@ -232,10 +242,13 @@ class Engine:
             bufsize=1,
             **popen_kwargs(new_group=True),
         )
-        self._reader = threading.Thread(target=self._drain, args=(on_line,), daemon=True)
+        self._stopping = False
+        self._reader = threading.Thread(target=self._drain, args=(on_line, on_died),
+                                        daemon=True)
         self._reader.start()
 
-    def _drain(self, on_line: LogFn | None) -> None:
+    def _drain(self, on_line: LogFn | None,
+               on_died: Callable[[str], None] | None = None) -> None:
         """Copy the engine's output to a file and a ring buffer.
 
         On its own thread: reading the pipe from the caller would block the
@@ -256,6 +269,31 @@ class Engine:
         except (OSError, ValueError):
             # The pipe closing under us is how a stopped engine ends. Not news.
             pass
+
+        # The loop above ends when the engine's output does, which means it has
+        # exited. Reporting that is the whole point of watching.
+        if on_died and not self._stopping and self.process is not None:
+            code = self.process.poll()
+            if code is not None and code != 0:
+                on_died(self._explain_exit(code))
+
+    def _explain_exit(self, code: int) -> str:
+        """Say what happened, in words, for the codes that mean something.
+
+        A GPU page fault -- "Memory access fault by GPU node-1" on ROCm -- kills
+        the process with SIGABRT, which arrives here as -6. It is not something
+        the user did, and it is not out of memory, so it should not be reported
+        as either.
+        """
+        if code == -6:
+            return ("ComfyUI was stopped by the graphics driver. This is usually a "
+                    "driver-level fault rather than anything you did.")
+        if code == -9:
+            return ("ComfyUI was killed, most likely by the system running out of "
+                    "memory. Closing other programs may help.")
+        if code < 0:
+            return f"ComfyUI was stopped by signal {-code}."
+        return f"ComfyUI stopped unexpectedly (exit code {code})."
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -307,6 +345,7 @@ class Engine:
         """Stop the engine and everything it started. Safe to call twice."""
         if self.process is None:
             return
+        self._stopping = True
         if self.process.poll() is None:
             terminate_tree(self.process)
             try:
