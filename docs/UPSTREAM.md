@@ -44,6 +44,10 @@ Verified 2026-09-05 against ComfyUI v0.34.0 unless stated otherwise.
 | `uv python install --no-bin` installs the interpreter without also writing a `python3.x` launcher into `~/.local/bin` | uv 0.12.10 `uv python install --help` | Nothing of ours may land outside the data root; the shim would shadow the user's own Python and survive uninstall |
 | `function UninstallSilent: Boolean;` returns True when the uninstaller runs under `/SILENT` or `/VERYSILENT` | `jrsoftware/issrc` `ISHelp/isxfunc.xml` ("Setup or Uninstall Info") | The post-uninstall message box is skipped when nobody is there to dismiss it |
 | A 416 to a byte-range request carries `Content-Range: bytes */<complete-length>` | RFC 9110 §15.5.17 / §14.4 | How a resumed download tells "already have it all" from "have more than the server does" |
+| `uv pip install --dry-run -v` logs one `DEBUG Selecting: <name>==<version> [compatible] (<filename>)` line per distribution it would fetch, and fetches nothing | uv 0.12.10, run live against PyPI | How the installer learns the PyTorch shopping list before downloading it with its own progress bar |
+| `uv pip install --no-index --offline --find-links <dir>` installs from wheel files on disk without touching the network; there is no `uv pip download` | uv 0.12.10 `uv pip --help`, `uv pip install --help`, live offline install | The wheels we download ourselves are handed to uv this way |
+| uv prints nothing while downloading when its output is a pipe: progress bars need a terminal, and its summary lines come only at phase boundaries | uv 0.12.10 observed on a live install | Why the graphics-card step looked hung for minutes, and why the download is now ours |
+| A simple-index page lists each file as an anchor whose text is the filename and whose href carries `#sha256=<hex>`; project names on it are normalised (`[-_.]+` → `-`, lowercased) | PEP 503; verified on PyPI live | Where the size and hash for each of uv's files come from |
 
 ## Known upstream issues we route around
 

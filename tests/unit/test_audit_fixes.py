@@ -698,3 +698,263 @@ class TestASilentDownloadIsNotMistakenForAHang:
         with pytest.raises(InstallFailed) as exc:
             runner._install_torch(install)
         assert "no sign of progress" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# uv's downloads get the same bar as the models
+
+
+# Verbatim from `uv pip install --dry-run -v` with uv 0.12.10, two packages.
+UV_DRY_RUN = """\
+DEBUG uv 0.12.10 (x86_64-unknown-linux-gnu)
+DEBUG At least one requirement is not satisfied: attrs==25.3.0
+DEBUG No cache entry for: https://pypi.org/simple/six/
+DEBUG Sending fresh GET request for: https://pypi.org/simple/six/
+DEBUG Selecting: six==1.17.0 [compatible] (six-1.17.0-py2.py3-none-any.whl)
+DEBUG No cache entry for: https://files.pythonhosted.org/packages/77/06/bb80f5f86020c4551da315d78b3ab75e8228f89f0162f2c3a819e407941a/attrs-25.3.0-py3-none-any.whl.metadata
+DEBUG Selecting: attrs==25.3.0 [compatible] (attrs-25.3.0-py3-none-any.whl)
+DEBUG Tried 2 versions: attrs 1, six 1
+DEBUG marker environment resolution took 0.113s
+DEBUG Identified uncached distribution: six==1.17.0
+DEBUG Identified uncached distribution: attrs==25.3.0
+ + attrs==25.3.0
+ + six==1.17.0
+"""
+
+SIX_WHEEL = b"PK\x05\x06" + b"\x00" * 18 + b"six" * 1000
+SIX_NAME = "six-1.17.0-py2.py3-none-any.whl"
+
+
+class FakeIndex(BaseHTTPRequestHandler):
+    """A PEP 503 simple index with one project, hashes in the fragment."""
+
+    heads: list[str] = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path == "/simple/six/":
+            import hashlib
+            sha = hashlib.sha256(SIX_WHEEL).hexdigest()
+            body = (f'<html><body><h1>Links for six</h1>'
+                    f'<a href="../../files/six-1.17.0-py2.py3-none-any.whl#sha256={sha}">'
+                    f'six-1.17.0-py2.py3-none-any.whl</a><br/>'
+                    f'<a href="../../files/six-1.17.0.tar.gz#sha256=abc">six-1.17.0.tar.gz</a>'
+                    f'</body></html>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/files/six-1.17.0-py2.py3-none-any.whl":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(SIX_WHEEL)))
+            self.end_headers()
+            self.wfile.write(SIX_WHEEL)
+        else:
+            self.send_error(404)
+
+    def do_HEAD(self):
+        type(self).heads.append(self.path)
+        if self.path == "/files/six-1.17.0-py2.py3-none-any.whl":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(SIX_WHEEL)))
+            self.end_headers()
+        else:
+            self.send_error(404)
+
+
+@pytest.fixture
+def fake_index():
+    FakeIndex.heads = []
+    server = HTTPServer(("127.0.0.1", 0), FakeIndex)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_port}/simple"
+    server.shutdown()
+
+
+class TestAskingUvWhatItWillFetch:
+    def test_every_chosen_file_is_read_from_the_dry_run(self):
+        files = uvtool.parse_selected(UV_DRY_RUN)
+        assert [(f.name, f.version, f.filename) for f in files] == [
+            ("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl"),
+            ("attrs", "25.3.0", "attrs-25.3.0-py3-none-any.whl"),
+        ]
+
+    def test_a_repeated_line_is_one_file(self):
+        assert len(uvtool.parse_selected(UV_DRY_RUN + UV_DRY_RUN)) == 2
+
+    def test_a_dry_run_that_fetches_nothing_is_empty(self):
+        assert uvtool.parse_selected("Audited 12 packages in 3ms\n") == []
+
+    def test_the_dry_run_is_a_dry_run(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: (
+            seen.update(cmd=[str(c) for c in cmd]), _ok_result(UV_DRY_RUN))[1])
+        files = uvtool.plan_install(Path("uv"), tmp_path, ["torch"], index_url="https://i/whl")
+        assert "--dry-run" in seen["cmd"] and "-v" in seen["cmd"]
+        assert seen["cmd"][seen["cmd"].index("--index-url") + 1] == "https://i/whl"
+        assert [f.name for f in files] == ["six", "attrs"]
+
+    def test_a_failed_dry_run_is_an_empty_list_not_a_crash(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: proc.Result(1, "", "boom"))
+        assert uvtool.plan_install(Path("uv"), tmp_path, ["torch"]) == []
+
+
+class TestLookingTheFilesUpOnTheIndex:
+    def test_url_hash_and_size_come_from_the_simple_page(self, fake_index):
+        import hashlib
+        [six] = uvtool.locate([uvtool.WheelFile("six", "1.17.0", SIX_NAME)], fake_index)
+        assert six.url == fake_index.replace("/simple", "") + "/files/" + SIX_NAME
+        assert six.sha256 == hashlib.sha256(SIX_WHEEL).hexdigest()
+        assert six.size_bytes == len(SIX_WHEEL)
+        assert "#" not in six.url
+
+    def test_a_file_the_index_does_not_list_comes_back_without_a_url(self, fake_index):
+        [odd] = uvtool.locate([uvtool.WheelFile("six", "1.17.0", "six-9.9.9-py3-none-any.whl")],
+                              fake_index)
+        assert odd.url == "" and odd.size_bytes == 0
+
+    def test_a_project_that_is_not_there_at_all(self, fake_index):
+        [gone] = uvtool.locate([uvtool.WheelFile("nope", "1", "nope-1-py3-none-any.whl")],
+                               fake_index)
+        assert gone.url == ""
+
+    @pytest.mark.parametrize("name, key", [
+        ("typing_extensions", "typing-extensions"), ("Jinja2", "jinja2"),
+        ("pytorch-triton-rocm", "pytorch-triton-rocm"), ("zope.interface", "zope-interface"),
+    ])
+    def test_project_names_are_normalised_for_the_page_url(self, name, key):
+        assert uvtool.normalise(name) == key
+
+
+class TestUvInstallsFromWhatWeDownloaded:
+    def test_find_links_means_offline_and_no_index(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: (
+            seen.update(cmd=[str(c) for c in cmd]), _ok_result())[1])
+        uvtool.pip_install(Path("uv"), tmp_path, ["torch"], index_url="https://i/whl",
+                           find_links=tmp_path / "wheels")
+        cmd = seen["cmd"]
+        assert "--no-index" in cmd and "--offline" in cmd
+        assert cmd[cmd.index("--find-links") + 1] == str(tmp_path / "wheels")
+        assert "--index-url" not in cmd, "an index alongside --no-index is a contradiction"
+
+    def test_without_it_the_index_is_used(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: (
+            seen.update(cmd=[str(c) for c in cmd]), _ok_result())[1])
+        uvtool.pip_install(Path("uv"), tmp_path, ["torch"], index_url="https://i/whl")
+        assert "--index-url" in seen["cmd"] and "--no-index" not in seen["cmd"]
+
+
+class TestTheGraphicsCardStepHasARealBar:
+    """What the user asked for: the torch download looking like the model
+    downloads -- how big it is, and how far along."""
+
+    def _runner(self, tmp_path, events):
+        plan = build_plan(AMD_NEEDS_OVERRIDE, [], tmp_path)
+        install = next(s for s in plan.steps if s.kind == Kind.INSTALL_TORCH)
+        runner = Runner(InstallPlan((install,), plan.torch, tmp_path, ()))
+        runner.on_event = events.append
+        return runner, install
+
+    def test_the_size_is_known_before_a_byte_is_fetched_and_the_bar_fills(
+            self, tmp_path, monkeypatch, fake_index):
+        events = []
+        runner, step = self._runner(tmp_path, events)
+        installed = {}
+
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
+            uvtool.WheelFile("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl")])
+        real_locate = uvtool.locate
+        monkeypatch.setattr(uvtool, "locate",
+                            lambda files, index, **kw: real_locate(files, fake_index))
+
+        def fake_pip(uv, runtime, packages, *, find_links=None, **kw):
+            installed["find_links"] = find_links
+            installed["present"] = sorted(p.name for p in find_links.iterdir())
+            installed["bytes"] = (find_links / "six-1.17.0-py2.py3-none-any.whl").read_bytes()
+            return _ok_result()
+
+        monkeypatch.setattr(uvtool, "pip_install", fake_pip)
+        runner._install_torch(step)
+
+        bars = [e for e in events if e.kind == "progress" and e.bytes_total]
+        assert bars, "no event carried a total, so the row could not show X / Y GB"
+        assert {e.bytes_total for e in bars} == {len(SIX_WHEEL)}
+        assert bars[-1].bytes_done == len(SIX_WHEEL) and bars[-1].fraction == 1.0
+        # The total must ride on the events *during* the transfer -- the ones
+        # with a speed -- not only on the final "done" one.
+        during = [e for e in events if e.kind == "progress" and "MB/s" in e.message]
+        assert during and all(e.bytes_total == len(SIX_WHEEL) for e in during)
+        assert installed["present"] == ["six-1.17.0-py2.py3-none-any.whl"]
+        assert installed["bytes"] == SIX_WHEEL, "uv was handed something other than the wheel"
+        assert not installed["find_links"].exists(), "gigabytes of wheels left behind after install"
+
+    def test_a_corrupt_download_is_not_handed_to_uv(self, tmp_path, monkeypatch, fake_index):
+        events = []
+        runner, step = self._runner(tmp_path, events)
+        runner.attempts = 1
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
+            uvtool.WheelFile("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl")])
+        monkeypatch.setattr(uvtool, "locate", lambda files, index, **kw: [
+            uvtool.WheelFile("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl",
+                             url=fake_index.replace("/simple", "") + "/files/" + SIX_NAME,
+                             sha256="0" * 64, size_bytes=len(SIX_WHEEL))])
+        monkeypatch.setattr(uvtool, "pip_install",
+                            lambda *a, **kw: pytest.fail("uv was given a file with the wrong hash"))
+        with pytest.raises(InstallFailed) as exc:
+            runner.run()
+        assert exc.value.reason_key == "checksum_mismatch"
+
+    def test_when_the_index_cannot_size_it_uv_fetches_as_before(self, tmp_path, monkeypatch):
+        events = []
+        runner, step = self._runner(tmp_path, events)
+        seen = {}
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
+            uvtool.WheelFile("torch", "2.14.0+rocm7.2", "torch-2.14.0+rocm7.2-cp312-cp312-x.whl")])
+        monkeypatch.setattr(uvtool, "locate", lambda files, index, **kw: list(files))  # no url
+
+        def fake_pip(uv, runtime, packages, *, find_links=None, heartbeat=None, **kw):
+            seen.update(find_links=find_links, heartbeat=heartbeat)
+            return _ok_result()
+
+        monkeypatch.setattr(uvtool, "pip_install", fake_pip)
+        runner._install_torch(step)
+        assert seen["find_links"] is None and seen["heartbeat"] is not None
+
+    def test_nothing_to_fetch_means_no_download_and_a_plain_install(self, tmp_path, monkeypatch):
+        events = []
+        runner, step = self._runner(tmp_path, events)
+        calls = []
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [])
+        monkeypatch.setattr(uvtool, "locate", lambda *a, **kw: pytest.fail("nothing to look up"))
+        monkeypatch.setattr(uvtool, "pip_install",
+                            lambda *a, **kw: (calls.append(kw.get("find_links")), _ok_result())[1])
+        runner._install_torch(step)
+        assert calls == [None]
+
+    def test_if_uv_rejects_the_folder_it_fetches_itself(self, tmp_path, monkeypatch, fake_index):
+        events = []
+        runner, step = self._runner(tmp_path, events)
+        calls = []
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
+            uvtool.WheelFile("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl")])
+        real_locate = uvtool.locate
+        monkeypatch.setattr(uvtool, "locate",
+                            lambda files, index, **kw: real_locate(files, fake_index))
+
+        def fake_pip(uv, runtime, packages, *, find_links=None, **kw):
+            calls.append(find_links)
+            return proc.Result(1, "", "no solution") if find_links else _ok_result()
+
+        monkeypatch.setattr(uvtool, "pip_install", fake_pip)
+        runner._install_torch(step)
+        assert calls[0] is not None and calls[1] is None

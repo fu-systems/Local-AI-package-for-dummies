@@ -14,14 +14,19 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import sys
 import tarfile
 import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import parse_qs, urljoin, urlsplit
 
-from toolshed.exec.download import CancelFn, download_file
+import httpx
+
+from toolshed.exec.download import CancelFn, download_file, remote_size
 from toolshed.exec.proc import Result, run
 
 UV_VERSION = "0.12.10"
@@ -175,8 +180,14 @@ def pip_install(
     timeout: float = 1800,
     should_cancel: CancelFn | None = None,
     heartbeat: Callable[[], bool] | None = None,
+    find_links: Path | None = None,
 ) -> Result:
     """Install into our venv.
+
+    With ``find_links`` the install is offline, from files already on disk:
+    ``--no-index`` so nothing is fetched, ``--offline`` so nothing can be. That
+    is how a download we did ourselves -- with a real progress bar -- is handed
+    to uv to unpack. Without it uv fetches from ``index_url`` as usual.
 
     ``heartbeat`` is polled while uv runs, because uv is silent while it
     downloads: progress bars are suppressed (UV_NO_PROGRESS, and it would not
@@ -190,11 +201,164 @@ def pip_install(
     "Torch not compiled with CUDA enabled".
     """
     cmd: list[str | Path] = [uv, "pip", "install", "--python", venv_python(runtime_dir)]
-    if index_url:
+    if find_links is not None:
+        cmd += ["--no-index", "--offline", "--find-links", str(find_links)]
+    elif index_url:
         cmd += ["--index-url", index_url]
     cmd += packages
     return run(cmd, env=uv_env(runtime_dir), timeout=timeout, on_line=log,
                should_cancel=should_cancel, heartbeat=heartbeat)
+
+
+# -- knowing what uv will fetch before it fetches it -------------------------
+#
+# uv is silent while it downloads, and the PyTorch build is gigabytes. The
+# models get a real bar -- "2.3 / 12.4 GB" -- because we fetch them ourselves
+# and know every size in advance. To give uv's downloads the same bar we ask
+# uv what it *would* fetch (a dry run), look each file up on the index for its
+# size and hash, download them with our own machinery, and hand uv the folder.
+
+PYPI_SIMPLE = "https://pypi.org/simple"
+
+# One line per chosen distribution in `uv pip install --dry-run -v`, verified
+# against uv 0.12.10:
+#     DEBUG Selecting: six==1.17.0 [compatible] (six-1.17.0-py2.py3-none-any.whl)
+SELECTING = re.compile(
+    r"Selecting: (?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>\S+) "
+    r"\[[^\]]*\] \((?P<file>\S+\.(?:whl|tar\.gz|zip))\)")
+
+
+@dataclass(frozen=True)
+class WheelFile:
+    """One file an install needs: what uv chose, and where the index keeps it."""
+
+    name: str
+    version: str
+    filename: str
+    url: str = ""
+    sha256: str = ""
+    size_bytes: int = 0
+
+
+def parse_selected(output: str) -> list[WheelFile]:
+    """The distributions a verbose dry run said it would fetch, in order."""
+    found: list[WheelFile] = []
+    seen: set[str] = set()
+    for match in SELECTING.finditer(output):
+        if match["file"] in seen:
+            continue
+        seen.add(match["file"])
+        found.append(WheelFile(match["name"], match["version"], match["file"]))
+    return found
+
+
+def plan_install(
+    uv: Path,
+    runtime_dir: Path,
+    packages: list[str],
+    *,
+    index_url: str | None = None,
+    should_cancel: CancelFn | None = None,
+) -> list[WheelFile]:
+    """Ask uv which files an install would fetch, without fetching them.
+
+    Empty when uv would fetch nothing (everything is installed already) and
+    also when the dry run fails or says something we do not recognise; the
+    caller then installs the ordinary way and lets uv report its own error.
+    """
+    cmd: list[str | Path] = [uv, "pip", "install", "--dry-run", "-v",
+                             "--python", venv_python(runtime_dir)]
+    if index_url:
+        cmd += ["--index-url", index_url]
+    cmd += packages
+    result = run(cmd, env=uv_env(runtime_dir), timeout=600, should_cancel=should_cancel)
+    if not result.ok:
+        return []
+    return parse_selected(result.stdout)
+
+
+def normalise(name: str) -> str:
+    """PEP 503 project-name normalisation: `typing_extensions` -> `typing-extensions`."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+class _Anchors(HTMLParser):
+    """filename -> href from a PEP 503 simple index page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: dict[str, str] = {}
+        self._href: str | None = None
+        self._text = ""
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self._href = dict(attrs).get("href")
+            self._text = ""
+
+    def handle_data(self, data):
+        if self._href is not None:
+            self._text += data
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._href is not None:
+            self.links[self._text.strip()] = self._href
+            self._href = None
+
+
+def locate(
+    files: list[WheelFile],
+    index_url: str,
+    *,
+    client: httpx.Client | None = None,
+    token: str | None = None,
+) -> list[WheelFile]:
+    """Fill in each file's URL, hash and size from the index.
+
+    Every file uv chose is listed on its project's simple page, as an anchor
+    whose text is the filename and whose href carries the hash as a
+    ``#sha256=`` fragment (PEP 503). The size comes from a HEAD request. A file
+    the page does not list is returned with an empty URL; the caller treats
+    any of those as "cannot do this properly" and lets uv fetch instead.
+    """
+    owned = client is None
+    # Internet-facing, like download_file, so the user's proxy settings apply;
+    # trust_env=False is for our loopback calls to ComfyUI only.
+    client = client or httpx.Client(follow_redirects=True, timeout=30.0)
+    # Ask for the HTML flavour explicitly: PyPI also speaks PEP 691 JSON.
+    accept = {"Accept": "application/vnd.pypi.simple.v1+html, text/html;q=0.9, */*;q=0.1"}
+    pages: dict[str, tuple[str, dict[str, str]]] = {}
+    try:
+        located = []
+        for item in files:
+            key = normalise(item.name)
+            if key not in pages:
+                page_url = f"{index_url.rstrip('/')}/{key}/"
+                links: dict[str, str] = {}
+                try:
+                    reply = client.get(page_url, headers=accept)
+                    if reply.status_code == 200:
+                        parser = _Anchors()
+                        parser.feed(reply.text)
+                        links = parser.links
+                except httpx.HTTPError:
+                    pass
+                pages[key] = (page_url, links)
+            page_url, links = pages[key]
+            href = links.get(item.filename)
+            if not href:
+                located.append(item)
+                continue
+            url = urljoin(page_url, href)
+            parts = urlsplit(url)
+            sha = parse_qs(parts.fragment).get("sha256", [""])[0]
+            clean = parts._replace(fragment="").geturl()
+            located.append(replace(item, url=clean, sha256=sha,
+                                   size_bytes=remote_size(clean, token=token, client=client)))
+        return located
+    finally:
+        if owned:
+            client.close()
 
 
 def cache_bytes(runtime_dir: Path) -> int:
