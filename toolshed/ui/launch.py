@@ -56,6 +56,9 @@ class LaunchPage(QtWidgets.QWidget):
     """Open ComfyUI, and say what is happening while it comes up."""
 
     want_more_packs = QtCore.Signal()
+    want_easy_mode = QtCore.Signal()
+    engine_ready = QtCore.Signal(str)      # url
+    engine_stopped = QtCore.Signal()
 
     def __init__(self, root: Path) -> None:
         super().__init__()
@@ -111,6 +114,12 @@ class LaunchPage(QtWidgets.QWidget):
         self.folder_button = QtWidgets.QPushButton("Open my pictures folder")
         self.folder_button.clicked.connect(self.open_output_folder)
         row.addWidget(self.folder_button)
+
+        self.easy_button = QtWidgets.QPushButton("Make something (easy mode)")
+        self.easy_button.clicked.connect(self.want_easy_mode)
+        self.easy_button.setEnabled(False)
+        self.easy_button.setToolTip("Start ComfyUI first — it does the work.")
+        row.addWidget(self.easy_button)
 
         self.more_button = QtWidgets.QPushButton("Set up more")
         self.more_button.clicked.connect(self.want_more_packs)
@@ -181,6 +190,9 @@ class LaunchPage(QtWidgets.QWidget):
         self.open_button.setEnabled(True)
         self.open_button.setText("Open ComfyUI again")
         self.status.setText("ComfyUI is running.")
+        self.easy_button.setEnabled(True)
+        self.easy_button.setToolTip("")
+        self.engine_ready.emit(url)
         self.address.setText(f"If your browser did not open, go to: {url}")
         self.address.setVisible(True)
         if not open_in_browser(url):
@@ -211,6 +223,8 @@ class LaunchPage(QtWidgets.QWidget):
         self.open_button.setEnabled(True)
         self.open_button.setText("Open ComfyUI")
         self.status.setText("ComfyUI is stopped.")
+        self.easy_button.setEnabled(False)
+        self.engine_stopped.emit()
 
     def open_output_folder(self) -> None:
         folder = Layout(self.root).output_dir

@@ -20,6 +20,7 @@ from toolshed.planner import build_plan
 from toolshed.ui.choose import ChoosePage
 from toolshed.ui.install import InstallPage
 from toolshed.ui.launch import LaunchPage
+from toolshed.ui.make import MakePage
 from toolshed.ui.ready import ReadyPage, default_data_root
 
 _YES = "✓"   # check mark
@@ -141,6 +142,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ready_page: ReadyPage | None = None
         self.install_page: InstallPage | None = None
         self.launch_page: LaunchPage | None = None
+        self.make_page: MakePage | None = None
         if verdict.supported:
             self.choose_page = ChoosePage(load_packs(), report)
             self.choose_page.selection_changed.connect(self._sync_nav)
@@ -150,10 +152,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.install_page.failed.connect(self._on_install_failed)
             self.launch_page = LaunchPage(default_data_root())
             self.launch_page.want_more_packs.connect(self._go_choose_packs)
+            self.make_page = MakePage(default_data_root())
+            self.launch_page.want_easy_mode.connect(self._go_easy_mode)
+            self.launch_page.engine_ready.connect(self._on_engine_ready)
+            self.launch_page.engine_stopped.connect(
+                lambda: self.make_page.set_engine(None))
             self.pages.addWidget(self.choose_page)
             self.pages.addWidget(self.ready_page)
             self.pages.addWidget(self.install_page)
             self.pages.addWidget(self.launch_page)
+            self.pages.addWidget(self.make_page)
 
         self.back_button = QtWidgets.QPushButton("Back")
         self.back_button.clicked.connect(self._go_back)
@@ -285,6 +293,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.back_button.setText("Back")
         self._start_install()
 
+    def _on_engine_ready(self, url: str) -> None:
+        """Easy mode can only work once something is there to do the work."""
+        from toolshed.exec.comfy_api import ComfyClient
+        from toolshed.exec.manifest import Manifest
+
+        installed = Manifest.load(default_data_root()).packs
+        self.make_page.set_packs(list(installed))
+        self.make_page.set_engine(ComfyClient(base_url=url))
+
+    def _go_easy_mode(self) -> None:
+        self.pages.setCurrentWidget(self.make_page)
+        self._sync_nav()
+
     def _go_choose_packs(self) -> None:
         """From the launch screen back into the wizard, to add a pack."""
         self._finished = False
@@ -294,6 +315,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _go_back(self) -> None:
         if self._failed:
             self.close()
+            return
+        if self.pages.currentWidget() is self.make_page:
+            self.pages.setCurrentWidget(self.launch_page)
+            self._sync_nav()
             return
         if self.pages.currentIndex() > 0:
             self.pages.setCurrentIndex(self.pages.currentIndex() - 1)
@@ -329,6 +354,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._finished:
             self.next_button.setText("Close")
             self.next_button.setEnabled(True)
+            return
+        if self.pages.currentWidget() is self.make_page:
+            self.back_button.setVisible(True)
+            self.back_button.setText("Back")
+            self.next_button.setText("Close")
+            self.next_button.setEnabled(True)
+            self._finished = True
             return
         if self.pages.currentWidget() is self.launch_page:
             # The launch page carries its own buttons; the wizard's primary

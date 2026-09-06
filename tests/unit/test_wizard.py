@@ -43,11 +43,12 @@ AMD_ON_WINDOWS = HardwareReport(os="windows", gpus=(Gpu(vendor="amd", vram_mb=20
 
 class TestThereIsAlwaysAWayForward:
     def test_supported_hardware_has_every_page(self, qapp):
-        """Verdict, choose, confirm, install, launch. The last one is what
-        turns a finished install into a running ComfyUI."""
+        """Verdict, choose, confirm, install, launch, make. The last two turn a
+        finished install into a running ComfyUI and then into a picture."""
         w = window_for(AMD_20G)
-        assert w.pages.count() == 5
+        assert w.pages.count() == 6
         assert w.launch_page is not None
+        assert w.make_page is not None
 
     def test_the_first_page_offers_a_next_step(self, qapp):
         """The bug that prompted all of this: a verdict and no exit."""
