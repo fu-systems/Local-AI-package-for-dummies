@@ -21,7 +21,7 @@ anything about any of them.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -51,6 +51,15 @@ PLACEHOLDER = {
     "audio.acestep": "slow piano, warm tape hiss, rain outside",
     "model3d.trellis2": "",
 }
+
+
+# Every "not ready yet" line, so _sync can recognise its own messages and
+# clear them without wiping a result or an error.
+NOT_READY_MESSAGES = frozenset({
+    "Start ComfyUI first — it does the actual work.",
+    "Nothing installed yet that easy mode can drive.",
+    "Choose a starting picture to work from.",
+})
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,113 @@ def recipes_for(pack_ids: list[str] | tuple[str, ...]) -> list[Recipe]:
     return found
 
 
+class InspectWorker(QtCore.QThread):
+    """Convert the workflow and work out what it exposes, off the GUI thread.
+
+    Settings have to exist before the button is pressed, not after: the whole
+    point is choosing what to make. Working them out needs /object_info from
+    the running engine, so it cannot happen at start-up either -- it happens
+    when a workflow is picked and the engine is up.
+    """
+
+    inspected = QtCore.Signal(object)         # Knobs
+    failed = QtCore.Signal(str)
+
+    def __init__(self, client: ComfyClient, workflow: Path, specs_cache: dict) -> None:
+        super().__init__()
+        self.client = client
+        self.workflow = workflow
+        self.specs_cache = specs_cache
+
+    def run(self) -> None:      # noqa: D102 -- QThread entry point
+        try:
+            import json
+
+            if "specs" not in self.specs_cache:
+                self.specs_cache["specs"] = specs_from_object_info(self.client.object_info())
+            specs = self.specs_cache["specs"]
+            workflow = json.loads(self.workflow.read_text(encoding="utf-8"))
+            knobs = analyse(to_api(workflow, specs), specs)
+        except (ComfyError, ConversionError) as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:                      # noqa: BLE001
+            self.failed.emit(f"Could not read this workflow: {exc}")
+        else:
+            self.inspected.emit(knobs)
+
+
+class ControlRow:
+    """One editable input, as a widget that knows how to read itself back.
+
+    Built from what the engine said about the input rather than from a table
+    here, so an input on a node nobody anticipated still gets a spin box with
+    the right bounds or a dropdown with the real choices.
+    """
+
+    def __init__(self, control) -> None:
+        self.control = control
+        self.widget = self._build(control)
+        if control.tooltip:
+            self.widget.setToolTip(control.tooltip)
+
+    @staticmethod
+    def _build(control) -> QtWidgets.QWidget:
+        if control.kind == "choice":
+            box = QtWidgets.QComboBox()
+            box.addItems(list(control.choices))
+            if control.value is not None and str(control.value) in control.choices:
+                box.setCurrentText(str(control.value))
+            return box
+        if control.kind == "bool":
+            box = QtWidgets.QCheckBox()
+            box.setChecked(bool(control.value))
+            return box
+        if control.kind == "int":
+            box = QtWidgets.QSpinBox()
+            # Qt spin boxes are 32-bit. A seed's max is 2**64, which would
+            # raise on the way in, so the range is clamped to what Qt can hold.
+            low = int(max(control.minimum if control.minimum is not None else -2**31, -2**31))
+            high = int(min(control.maximum if control.maximum is not None else 2**31 - 1,
+                           2**31 - 1))
+            box.setRange(low, max(low, high))
+            if control.step:
+                box.setSingleStep(max(1, int(control.step)))
+            box.setValue(int(control.value) if isinstance(control.value, (int, float)) else low)
+            return box
+        if control.kind == "float":
+            box = QtWidgets.QDoubleSpinBox()
+            box.setDecimals(3)
+            box.setRange(float(control.minimum if control.minimum is not None else -1e6),
+                         float(control.maximum if control.maximum is not None else 1e6))
+            if control.step:
+                box.setSingleStep(float(control.step))
+            if isinstance(control.value, (int, float)):
+                box.setValue(float(control.value))
+            return box
+        if control.kind == "text":
+            box = QtWidgets.QPlainTextEdit()
+            box.setMaximumHeight(70)
+            box.setPlainText("" if control.value is None else str(control.value))
+            return box
+        box = QtWidgets.QLineEdit()
+        box.setText("" if control.value is None else str(control.value))
+        return box
+
+    def value(self):
+        widget = self.widget
+        if isinstance(widget, QtWidgets.QComboBox):
+            return widget.currentText()
+        if isinstance(widget, QtWidgets.QCheckBox):
+            return widget.isChecked()
+        if isinstance(widget, QtWidgets.QSpinBox):
+            return widget.value()
+        if isinstance(widget, QtWidgets.QDoubleSpinBox):
+            return widget.value()
+        if isinstance(widget, QtWidgets.QPlainTextEdit):
+            return widget.toPlainText()
+        return widget.text()
+
+
 class GenerateWorker(QtCore.QThread):
     """One generation, off the GUI thread."""
 
@@ -95,12 +211,13 @@ class GenerateWorker(QtCore.QThread):
     failed = QtCore.Signal(str, str)          # message, detail
 
     def __init__(self, client: ComfyClient, workflow: Path, settings: Settings,
-                 specs_cache: dict) -> None:
+                 specs_cache: dict, picture: Path | None = None) -> None:
         super().__init__()
         self.client = client
         self.workflow = workflow
         self.settings = settings
         self.specs_cache = specs_cache
+        self.picture = picture
         self._stop = False
 
     def stop(self) -> None:
@@ -117,11 +234,21 @@ class GenerateWorker(QtCore.QThread):
 
             workflow = json.loads(self.workflow.read_text(encoding="utf-8"))
             prompt = to_api(workflow, specs)
-            knobs = analyse(prompt)
+            knobs = analyse(prompt, specs)
             size = knobs.current_size
             if size:
                 self.analysed.emit(*size)
-            graph = knobs_module.apply(prompt, knobs, self.settings)
+
+            settings = self.settings
+            if self.picture is not None:
+                # Uploaded here, not when it was chosen: the engine has to be
+                # running to receive it, and this is the first moment we know
+                # it is.
+                self.note.emit(f"Sending {self.picture.name}…")
+                settings = replace(settings,
+                                   image=self.client.upload_image(self.picture))
+
+            graph = knobs_module.apply(prompt, knobs, settings)
 
             self.note.emit("Queued.")
             outputs = self.client.run(
@@ -152,6 +279,10 @@ class MakePage(QtWidgets.QWidget):
         self.recipes: list[Recipe] = []
         self._specs_cache: dict = {}
         self._last: list[Output] = []
+        self.knobs = None
+        self.rows: list[ControlRow] = []
+        self.picture: Path | None = None
+        self.inspector: InspectWorker | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(28, 20, 28, 12)
@@ -175,6 +306,31 @@ class MakePage(QtWidgets.QWidget):
         self.prompt.setPlaceholderText("Describe what you want…")
         self.prompt.setMaximumHeight(90)
         layout.addWidget(self.prompt)
+
+        # Starting picture. Shown only for workflows that load one -- turning a
+        # photo into a 3D model, or editing a picture. Without it those packs
+        # could be picked and then had nothing to act on, which is not a
+        # limitation of the model but a missing box.
+        self.picture_row = QtWidgets.QWidget()
+        picture_layout = QtWidgets.QHBoxLayout(self.picture_row)
+        picture_layout.setContentsMargins(0, 0, 0, 0)
+        self.picture_label = QtWidgets.QLabel("Starting picture:")
+        self.picture_name = QtWidgets.QLabel("none chosen")
+        self.picture_name.setWordWrap(True)
+        self.picture_button = QtWidgets.QPushButton("Choose a picture…")
+        self.picture_button.clicked.connect(self.choose_picture)
+        self.picture_clear = QtWidgets.QPushButton("Clear")
+        self.picture_clear.clicked.connect(self.clear_picture)
+        self.picture_thumb = QtWidgets.QLabel()
+        self.picture_thumb.setFixedSize(64, 64)
+        self.picture_thumb.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        picture_layout.addWidget(self.picture_label)
+        picture_layout.addWidget(self.picture_button)
+        picture_layout.addWidget(self.picture_clear)
+        picture_layout.addWidget(self.picture_thumb)
+        picture_layout.addWidget(self.picture_name, 1)
+        self.picture_row.setVisible(False)
+        layout.addWidget(self.picture_row)
 
         # Everything most people never need, out of the way but not hidden.
         self.more = QtWidgets.QGroupBox("More settings")
@@ -215,6 +371,25 @@ class MakePage(QtWidgets.QWidget):
         form.addRow("Seed", seed_widget)
         layout.addWidget(self.more)
 
+        # Everything else the workflow exposes, built from what the engine says
+        # about each input. Collapsed by default: it is the difference between
+        # easy mode being a toy and being usable, but it is not the first
+        # thing a beginner should meet.
+        self.all_settings = QtWidgets.QGroupBox("All settings")
+        self.all_settings.setCheckable(True)
+        self.all_settings.setChecked(False)
+        outer = QtWidgets.QVBoxLayout(self.all_settings)
+        self.settings_area = QtWidgets.QScrollArea()
+        self.settings_area.setWidgetResizable(True)
+        self.settings_area.setMinimumHeight(180)
+        self.settings_host = QtWidgets.QWidget()
+        self.settings_form = QtWidgets.QFormLayout(self.settings_host)
+        self.settings_area.setWidget(self.settings_host)
+        outer.addWidget(self.settings_area)
+        self.all_settings.toggled.connect(self.settings_area.setVisible)
+        self.settings_area.setVisible(False)
+        layout.addWidget(self.all_settings)
+
         self.go = QtWidgets.QPushButton("Make it")
         self.go.setDefault(True)
         self.go.clicked.connect(self.generate)
@@ -251,6 +426,8 @@ class MakePage(QtWidgets.QWidget):
         """Called when ComfyUI comes up or goes away."""
         self.client = client
         self._specs_cache.clear()
+        if client is not None:
+            self.inspect()
         self._sync()
 
     def set_packs(self, pack_ids: list[str]) -> None:
@@ -271,30 +448,146 @@ class MakePage(QtWidgets.QWidget):
         self.go.setText(recipe.verb)
         self.prompt.setPlaceholderText(
             PLACEHOLDER.get(recipe.pack_id) or "Describe what you want…")
+        self.inspect()
+        self._sync()
+
+    # -- what this workflow offers -------------------------------------------
+
+    def shutdown(self) -> None:
+        """Stop any worker before this page goes away.
+
+        Qt aborts the whole process if a QThread is destroyed while running --
+        "QThread: Destroyed while thread is still running" -- so a page closed
+        while it was still asking the engine about a workflow would take the
+        app down with it. Waiting is bounded: neither worker blocks on anything
+        without a timeout of its own.
+        """
+        for worker in (self.inspector, self.worker):
+            if worker is None:
+                continue
+            if hasattr(worker, "stop"):
+                worker.stop()
+            if worker.isRunning():
+                worker.wait(5000)
+        self.inspector = None
+        self.worker = None
+
+    def inspect(self) -> None:
+        """Ask the workflow what it can be told, and build controls for it."""
+        recipe = self._current()
+        if recipe is None or self.client is None:
+            return
+        # One at a time. Switching workflows quickly would otherwise leave
+        # several in flight and the last to answer would win, not the last
+        # chosen.
+        if self.inspector is not None and self.inspector.isRunning():
+            self.inspector.wait(5000)
+        self.inspector = InspectWorker(self.client, recipe.workflow, self._specs_cache)
+        self.inspector.inspected.connect(self._on_inspected)
+        self.inspector.failed.connect(self.status.setText)
+        self.inspector.start()
+
+    def _on_inspected(self, knobs) -> None:
+        self.knobs = knobs
+
+        # A workflow with no text encoder has nothing to do with a prompt box.
+        self.prompt.setVisible(knobs.takes_text)
+        self.picture_row.setVisible(knobs.takes_picture)
+        self.negative.setEnabled(bool(knobs.negative))
+        self.size_row_widget.setEnabled(knobs.has_size)
+        size = knobs.current_size
+        if size:
+            self._on_analysed(*size)
+
+        while self.settings_form.rowCount():
+            self.settings_form.removeRow(0)
+        self.rows = []
+        last_title = None
+        for control in knobs.advanced:
+            if control.node_title != last_title:
+                heading = QtWidgets.QLabel(f"<b>{control.node_title}</b>")
+                self.settings_form.addRow(heading)
+                last_title = control.node_title
+            row = ControlRow(control)
+            self.rows.append(row)
+            self.settings_form.addRow(control.label, row.widget)
+
+        self.all_settings.setTitle(f"All settings ({len(self.rows)})")
+        self.all_settings.setVisible(bool(self.rows))
+        self._sync()
+
+    # -- the starting picture -------------------------------------------------
+
+    def choose_picture(self) -> None:
+        chosen, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Choose a picture", str(Path.home()),
+            "Pictures (*.png *.jpg *.jpeg *.webp *.bmp);;All files (*)")
+        if chosen:
+            self.set_picture(Path(chosen))
+
+    def set_picture(self, path: Path) -> None:
+        self.picture = path
+        self.picture_name.setText(path.name)
+        thumb = QtGui.QPixmap(str(path))
+        if not thumb.isNull():
+            self.picture_thumb.setPixmap(thumb.scaled(
+                self.picture_thumb.size(),
+                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                QtCore.Qt.TransformationMode.SmoothTransformation))
+        self._sync()
+
+    def clear_picture(self) -> None:
+        self.picture = None
+        self.picture_name.setText("none chosen")
+        self.picture_thumb.clear()
         self._sync()
 
     def _sync(self) -> None:
         busy = self.worker is not None and self.worker.isRunning()
         ready = self.client is not None and bool(self.recipes) and not busy
+
+        # A workflow that starts from a picture cannot start without one. The
+        # button says why rather than failing on click.
+        needs_picture = bool(self.knobs and self.knobs.takes_picture and not self.picture)
+        if needs_picture:
+            ready = False
+            self.go.setToolTip("Choose a starting picture first.")
+        else:
+            self.go.setToolTip("")
+
         self.go.setEnabled(ready)
+
+        # One place decides the "not ready yet" line, and one place clears it.
+        # Setting these in separate branches is how "Start ComfyUI first" once
+        # survived ComfyUI starting, and how "Choose a starting picture" then
+        # survived a picture being chosen.
+        blocked = ""
         if self.client is None:
-            self.status.setText("Start ComfyUI first — it does the actual work.")
+            blocked = "Start ComfyUI first — it does the actual work."
         elif not self.recipes:
-            self.status.setText("Nothing installed yet that easy mode can drive.")
-        elif not busy and self.status.text().startswith(("Start ComfyUI", "Nothing installed")):
-            # Clear the "not ready" message once it stops being true, without
-            # wiping a result or an error the user still wants to read.
+            blocked = "Nothing installed yet that easy mode can drive."
+        elif needs_picture:
+            blocked = "Choose a starting picture to work from."
+
+        if blocked:
+            self.status.setText(blocked)
+        elif not busy and self.status.text() in NOT_READY_MESSAGES:
+            # Cleared only when it is one of ours, so a result or an error the
+            # user still wants to read is left alone.
             self.status.setText("")
 
     # -- doing it -----------------------------------------------------------
 
     def settings(self) -> Settings:
+        overrides = {row.control.key: row.value() for row in self.rows
+                     if row.control.value is not None}
         return Settings(
             prompt=self.prompt.toPlainText().strip() or None,
             negative=self.negative.text().strip() or None,
             width=self.width.value() or None,
             height=self.height.value() or None,
             seed=self.seed.value() if self.same_seed.isChecked() else None,
+            overrides=overrides,
         )
 
     def generate(self) -> None:
@@ -303,7 +596,7 @@ class MakePage(QtWidgets.QWidget):
             return
 
         self.worker = GenerateWorker(self.client, recipe.workflow, self.settings(),
-                                     self._specs_cache)
+                                     self._specs_cache, picture=self.picture)
         self.worker.progressed.connect(self._on_progress)
         self.worker.analysed.connect(self._on_analysed)
         self.worker.note.connect(self.status.setText)

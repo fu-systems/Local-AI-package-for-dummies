@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("websockets")
+QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from comfy_fixtures import OBJECT_INFO, load_workflow  # noqa: E402
 from comfy_fixtures import SPECS as OBJECT_INFO_SPECS  # noqa: E402
@@ -371,13 +372,24 @@ class SubmitServer(BaseHTTPRequestHandler):
     """
 
     received: list[dict] = []
+    uploads: list[bytes] = []
     reject_with: dict | None = None
+    upload_reply: dict | None = None
 
     def log_message(self, *a):
         pass
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path.startswith("/upload/"):
+            type(self).uploads.append(body)
+            payload = json.dumps(type(self).upload_reply or {}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         type(self).received.append(json.loads(body))
         if type(self).reject_with is not None:
             payload = json.dumps(type(self).reject_with).encode()
@@ -394,7 +406,9 @@ class SubmitServer(BaseHTTPRequestHandler):
 @pytest.fixture
 def submit_server():
     SubmitServer.received = []
+    SubmitServer.uploads = []
     SubmitServer.reject_with = None
+    SubmitServer.upload_reply = None
     server = HTTPServer(("127.0.0.1", 0), SubmitServer)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server
@@ -506,19 +520,358 @@ class TestTheReadyMessage:
         from toolshed.ui.make import MakePage
 
         page = MakePage(Path("/tmp/nowhere"))
-        page.set_packs(["image.sdxl"])
-        assert "Start ComfyUI" in page.status.text()
+        try:
+            page.set_packs(["image.sdxl"])
+            assert "Start ComfyUI" in page.status.text()
 
-        page.set_engine(ComfyClient(base_url="http://127.0.0.1:1"))
-        assert page.status.text() == ""
-        assert page.go.isEnabled()
+            page.set_engine(ComfyClient(base_url="http://127.0.0.1:1"))
+            assert page.status.text() == ""
+            assert page.go.isEnabled()
+        finally:
+            page.shutdown()
 
     def test_it_says_so_when_no_pack_can_be_driven(self, qapp_easy):
         from toolshed.exec.comfy_api import ComfyClient
         from toolshed.ui.make import MakePage
 
         page = MakePage(Path("/tmp/nowhere"))
+        try:
+            page.set_engine(ComfyClient(base_url="http://127.0.0.1:1"))
+            page.set_packs([])
+            assert "Nothing installed" in page.status.text()
+            assert not page.go.isEnabled()
+        finally:
+            page.shutdown()
+
+
+IMAGE_WORKFLOW = {
+    "nodes": [
+        {"id": 1, "type": "LoadImage", "inputs": [],
+         "widgets_values_named": {"image": "viking_wolf_rune_axe.png", "upload": "image"},
+         "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}]},
+        {"id": 2, "type": "VAEDecode",
+         "inputs": [{"name": "samples", "type": "LATENT", "link": None},
+                    {"name": "vae", "type": "VAE", "link": None}],
+         "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [2]}]},
+        {"id": 3, "type": "SaveImage",
+         "inputs": [{"name": "images", "type": "IMAGE", "link": 1}],
+         "widgets_values_named": {"filename_prefix": "out"}, "outputs": []},
+    ],
+    "links": [[1, 1, 0, 3, 0, "IMAGE"]],
+}
+
+
+class TestAWorkflowThatStartsFromAPicture:
+    """The 3D pack could be chosen and then had nowhere to put the photo.
+
+    The shipped workflow carries the template's own filename --
+    viking_wolf_rune_axe.png -- which is not on anybody else's machine, so
+    running it unchanged asks the engine for a file it does not have.
+    """
+
+    def test_the_picture_input_is_found(self):
+        knobs = analyse(to_api(IMAGE_WORKFLOW, OBJECT_INFO_SPECS), OBJECT_INFO_SPECS)
+        assert knobs.takes_picture
+        assert knobs.images[0].input_name == "image"
+
+    def test_it_is_found_from_the_engines_metadata_not_the_class_name(self):
+        """image_upload marks it, so a node other than LoadImage works too."""
+        from toolshed.easy.convert import specs_from_object_info
+
+        specs = specs_from_object_info({
+            **OBJECT_INFO,
+            "LoadSomethingElse": {"input": {"required": {
+                "picture": [["a.png"], {"image_upload": True}]}}, "output": ["IMAGE"]},
+        })
+        workflow = {
+            "nodes": [{"id": 1, "type": "LoadSomethingElse", "inputs": [],
+                       "widgets_values_named": {"picture": "a.png"},
+                       "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [1]}]},
+                      {"id": 2, "type": "SaveImage",
+                       "inputs": [{"name": "images", "type": "IMAGE", "link": 1}],
+                       "widgets_values_named": {"filename_prefix": "o"}, "outputs": []}],
+            "links": [[1, 1, 0, 2, 0, "IMAGE"]],
+        }
+        knobs = analyse(to_api(workflow, specs), specs)
+        assert knobs.takes_picture
+        assert knobs.images[0].input_name == "picture"
+
+    def test_the_chosen_picture_replaces_the_templates_filename(self):
+        prompt = to_api(IMAGE_WORKFLOW, OBJECT_INFO_SPECS)
+        knobs = analyse(prompt, OBJECT_INFO_SPECS)
+        graph = apply(prompt, knobs, Settings(image="my-photo.png"))
+        loader = next(n for n in graph.values() if n["class_type"] == "LoadImage")
+        assert loader["inputs"]["image"] == "my-photo.png"
+        assert "viking" not in str(loader["inputs"])
+
+    def test_the_real_3d_workflow_has_one(self):
+        """The pack the complaint was about."""
+        import json
+
+        workflow = load_workflow("3d/01 Photo to 3D model.json")
+        loaders = [n for n in workflow["nodes"] if n["type"] == "LoadImage"]
+        assert loaders, "the 3D workflow has no LoadImage to attach a photo to"
+        assert "viking" in json.dumps(loaders[0].get("widgets_values_named")), \
+            "the template default changed; the picture box still has to override it"
+
+
+class TestUploadingThePicture:
+    def test_it_is_sent_and_the_engine_names_it(self, submit_server, tmp_path):
+        photo = tmp_path / "my photo.png"
+        photo.write_bytes(PICTURE_BYTES)
+
+        SubmitServer.upload_reply = {"name": "my photo.png", "subfolder": "",
+                                     "type": "input"}
+        client = ComfyClient(base_url=f"http://127.0.0.1:{submit_server.server_port}")
+        assert client.upload_image(photo) == "my photo.png"
+
+        sent = SubmitServer.uploads[0]
+        assert b"my photo.png" in sent
+        assert PICTURE_BYTES in sent
+
+    def test_a_subfolder_is_included_in_the_name(self, submit_server, tmp_path):
+        photo = tmp_path / "p.png"
+        photo.write_bytes(PICTURE_BYTES)
+        SubmitServer.upload_reply = {"name": "p.png", "subfolder": "toolshed",
+                                     "type": "input"}
+        client = ComfyClient(base_url=f"http://127.0.0.1:{submit_server.server_port}")
+        assert client.upload_image(photo) == "toolshed/p.png"
+
+    def test_an_engine_that_will_not_take_it_says_so(self, tmp_path):
+        photo = tmp_path / "p.png"
+        photo.write_bytes(PICTURE_BYTES)
+        client = ComfyClient(base_url="http://127.0.0.1:1")
+        with pytest.raises(ComfyError) as exc:
+            client.upload_image(photo)
+        assert exc.value.reason_key == "upload_failed"
+
+
+class TestEverySettingIsReachable:
+    """"all settings and options available that we can do" -- every widget the
+    engine reports, not the handful with friendly names."""
+
+    def _knobs(self, rel="image/02 Text to picture (SDXL).json"):
+        prompt = to_api(load_workflow(rel), OBJECT_INFO_SPECS)
+        return prompt, analyse(prompt, OBJECT_INFO_SPECS)
+
+    def test_the_sampler_settings_are_all_offered(self):
+        _, knobs = self._knobs()
+        offered = {c.input_name for c in knobs.advanced}
+        assert {"cfg", "sampler_name", "scheduler", "denoise", "batch_size"} <= offered
+
+    def test_a_choice_carries_the_engines_own_options(self):
+        _, knobs = self._knobs()
+        sampler = next(c for c in knobs.advanced if c.input_name == "sampler_name")
+        assert sampler.kind == "choice"
+        assert "euler" in sampler.choices
+
+    def test_numbers_carry_their_bounds(self):
+        _, knobs = self._knobs()
+        cfg = next(c for c in knobs.advanced if c.input_name == "cfg")
+        assert cfg.kind == "float"
+        assert cfg.maximum == 100.0
+
+    def test_wired_inputs_are_not_offered_as_boxes(self):
+        """A connected input is driven by another node; a box for it would be
+        offering a value the engine is going to ignore."""
+        _, knobs = self._knobs()
+        offered = {(c.node_id, c.input_name) for c in knobs.controls}
+        assert not any(name in {"model", "positive", "negative", "latent_image",
+                                "samples", "vae", "clip", "images"}
+                       for _, name in offered)
+
+    def test_a_widget_input_that_is_wired_up_is_not_offered(self):
+        """The case the type check alone does not cover.
+
+        width is an INT -- a widget by type -- but here another node supplies
+        it. A box for it would take a number the engine is going to ignore, and
+        the user would be left wondering why the size never changed.
+        """
+        from toolshed.easy.convert import specs_from_object_info
+
+        specs = specs_from_object_info({
+            **OBJECT_INFO,
+            "PrimitiveInt": {"input": {"required": {
+                "value": ["INT", {"default": 512, "min": 16, "max": 16384}]}},
+                "output": ["INT"]},
+        })
+        workflow = {
+            "nodes": [
+                {"id": 1, "type": "PrimitiveInt", "inputs": [],
+                 "widgets_values_named": {"value": 768},
+                 "outputs": [{"name": "INT", "type": "INT", "links": [1]}]},
+                {"id": 2, "type": "EmptyLatentImage",
+                 "inputs": [{"name": "width", "type": "INT",
+                             "widget": {"name": "width"}, "link": 1}],
+                 "widgets_values_named": {"width": 512, "height": 512, "batch_size": 1},
+                 "outputs": [{"name": "LATENT", "type": "LATENT", "links": []}]},
+            ],
+            "links": [[1, 1, 0, 2, 0, "INT"]],
+        }
+        prompt = to_api(workflow, specs)
+        assert isinstance(prompt["2"]["inputs"]["width"], list), "not wired in the graph"
+
+        knobs = analyse(prompt, specs)
+        offered = {(c.node_id, c.input_name) for c in knobs.controls}
+        assert ("2", "width") not in offered, "offered a box for a value the engine ignores"
+        assert ("2", "height") in offered, "the unwired ones should still be offered"
+
+    def test_model_filenames_are_never_offered(self):
+        """They are decided by the pack that was installed, and every other
+        value the engine would accept belongs to a pack you do not have."""
+        _, knobs = self._knobs()
+        assert not any(c.input_name == "ckpt_name" for c in knobs.controls)
+
+    def test_the_named_controls_are_not_repeated_in_the_list(self):
+        """Showing the prompt twice invites setting it in both places and
+        getting whichever the code writes last."""
+        _, knobs = self._knobs()
+        assert all(not c.role for c in knobs.advanced)
+        assert {c.role for c in knobs.controls if c.role} >= {
+            "prompt", "negative", "width", "height", "seed", "steps"}
+
+    def test_an_override_reaches_the_graph(self):
+        prompt, knobs = self._knobs()
+        cfg = next(c for c in knobs.advanced if c.input_name == "cfg")
+        graph = apply(prompt, knobs, Settings(overrides={cfg.key: 3.5}))
+        assert graph[cfg.node_id]["inputs"]["cfg"] == 3.5
+
+    def test_an_override_beats_an_inferred_value(self):
+        """An explicit edit is the user being specific."""
+        prompt, knobs = self._knobs()
+        width = knobs.width[0]
+        graph = apply(prompt, knobs,
+                      Settings(width=512, overrides={(width.node_id, "width"): 768}))
+        assert graph[width.node_id]["inputs"]["width"] == 768
+
+    def test_without_object_info_there_are_no_controls(self):
+        """Type and bounds are not knowable from a value alone, and inventing
+        them would produce boxes that accept what the engine rejects."""
+        prompt = to_api(load_workflow("image/02 Text to picture (SDXL).json"),
+                        OBJECT_INFO_SPECS)
+        assert analyse(prompt).controls == []
+        assert analyse(prompt).positive, "roles should still be found"
+
+
+class TestThePictureBoxOnScreen:
+    """The complaint: the 3D pack could be chosen and there was nowhere to put
+    the photo. These drive the real page rather than the plumbing under it."""
+
+    def _page(self, tmp_path, workflow: dict, pack="model3d.trellis2"):
+        from toolshed.ui.make import MakePage, Recipe
+
+        path = tmp_path / "wf.json"
+        path.write_text(json.dumps(workflow))
+        page = MakePage(tmp_path / "root")
+        page.recipes = [Recipe(pack, "Turn a photo into a 3D model", path)]
+        page.what.addItem(page.recipes[0].name)
+        return page
+
+    def _inspected(self, page, engine):
+        import time
+
+        from toolshed.exec.comfy_api import ComfyClient
+
+        page.set_engine(ComfyClient(base_url=engine.url))
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and page.knobs is None:
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.02)
+        QtWidgets.QApplication.processEvents()
+        return page.knobs is not None
+
+    def test_a_picture_workflow_gets_a_picture_box(self, qapp_easy, engine, tmp_path):
+        page = self._page(tmp_path, IMAGE_WORKFLOW)
+        try:
+            assert self._inspected(page, engine), "the workflow was never inspected"
+            assert not page.picture_row.isHidden(), "no way to add the picture"
+            assert page.knobs.takes_picture
+        finally:
+            page.shutdown()
+
+    def test_it_will_not_run_until_one_is_chosen(self, qapp_easy, engine, tmp_path):
+        """Running it unchanged would ask the engine for the template's own
+        filename, which is on nobody else's machine."""
+        page = self._page(tmp_path, IMAGE_WORKFLOW)
+        try:
+            assert self._inspected(page, engine)
+            assert not page.go.isEnabled()
+            assert "starting picture" in page.status.text()
+            assert page.go.toolTip()
+        finally:
+            page.shutdown()
+
+    def test_choosing_one_enables_it_and_clears_the_message(self, qapp_easy, engine,
+                                                            tmp_path):
+        page = self._page(tmp_path, IMAGE_WORKFLOW)
+        try:
+            assert self._inspected(page, engine)
+            photo = tmp_path / "my-photo.png"
+            photo.write_bytes(PICTURE_BYTES)
+            page.set_picture(photo)
+
+            assert page.go.isEnabled()
+            assert "starting picture" not in page.status.text(), \
+                "the message outlived the thing it was asking for"
+            assert page.picture_name.text() == "my-photo.png"
+        finally:
+            page.shutdown()
+
+    def test_clearing_it_blocks_again(self, qapp_easy, engine, tmp_path):
+        page = self._page(tmp_path, IMAGE_WORKFLOW)
+        try:
+            assert self._inspected(page, engine)
+            photo = tmp_path / "p.png"
+            photo.write_bytes(PICTURE_BYTES)
+            page.set_picture(photo)
+            page.clear_picture()
+            assert not page.go.isEnabled()
+        finally:
+            page.shutdown()
+
+    def test_a_text_workflow_has_no_picture_box(self, qapp_easy, engine, tmp_path):
+        page = self._page(tmp_path, load_workflow("image/02 Text to picture (SDXL).json"),
+                          pack="image.sdxl")
+        try:
+            assert self._inspected(page, engine)
+            assert page.picture_row.isHidden()
+            assert not page.prompt.isHidden()
+            assert page.go.isEnabled()
+        finally:
+            page.shutdown()
+
+    def test_a_picture_workflow_with_no_words_hides_the_prompt_box(
+            self, qapp_easy, engine, tmp_path):
+        """Asking for a description when nothing reads one is a box that does
+        nothing."""
+        page = self._page(tmp_path, IMAGE_WORKFLOW)
+        try:
+            assert self._inspected(page, engine)
+            assert page.prompt.isHidden()
+        finally:
+            page.shutdown()
+
+    def test_the_settings_panel_is_built_from_the_workflow(self, qapp_easy, engine,
+                                                           tmp_path):
+        page = self._page(tmp_path, load_workflow("image/02 Text to picture (SDXL).json"),
+                          pack="image.sdxl")
+        try:
+            assert self._inspected(page, engine)
+            names = {row.control.input_name for row in page.rows}
+            assert {"cfg", "sampler_name", "scheduler", "denoise"} <= names
+            assert "ckpt_name" not in names
+            assert page.settings().overrides, "nothing would be sent"
+        finally:
+            page.shutdown()
+
+    def test_a_worker_left_running_does_not_take_the_app_down(self, qapp_easy, tmp_path):
+        """Qt aborts the process if a QThread is destroyed while running, so a
+        page closed mid-inspection would kill the app."""
+        from toolshed.exec.comfy_api import ComfyClient
+        from toolshed.ui.make import MakePage
+
+        page = self._page(tmp_path, IMAGE_WORKFLOW)
         page.set_engine(ComfyClient(base_url="http://127.0.0.1:1"))
-        page.set_packs([])
-        assert "Nothing installed" in page.status.text()
-        assert not page.go.isEnabled()
+        page.shutdown()
+        assert page.inspector is None
+        assert isinstance(page, MakePage)

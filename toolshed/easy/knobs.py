@@ -29,6 +29,49 @@ from typing import Any
 SEED_MAX = 0xFFFFFFFFFFFFFFFF
 
 
+# Inputs a settings screen must never offer. Editing them would either break
+# the graph or waste the user's time.
+NEVER_OFFER = frozenset({
+    # The editor's synthetic seed companion; not a backend input at all.
+    "control_after_generate",
+    # Model filenames. They are chosen by the pack that was installed, and the
+    # only other values the engine would accept are other packs' files.
+    "ckpt_name", "unet_name", "vae_name", "clip_name", "lora_name",
+    "model_name", "bg_removal_name", "style_model_name", "control_net_name",
+    "upscale_model_name", "clip_vision_name", "audio_encoder_name",
+})
+
+
+@dataclass(frozen=True)
+class Control:
+    """One thing the user may change, described well enough to draw a widget.
+
+    Everything here comes from the engine's own /object_info -- the type, the
+    bounds, the list of choices -- so a node nobody here has heard of still
+    gets a sensible control rather than a text box and a guess.
+    """
+
+    node_id: str
+    input_name: str
+    node_title: str
+    kind: str                          # int | float | bool | choice | text | string
+    value: Any = None
+    choices: tuple[str, ...] = ()
+    minimum: float | None = None
+    maximum: float | None = None
+    step: float | None = None
+    tooltip: str = ""
+    role: str = ""                     # prompt | negative | width | ... | ""
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.node_id, self.input_name)
+
+    @property
+    def label(self) -> str:
+        return self.input_name.replace("_", " ")
+
+
 @dataclass(frozen=True)
 class Target:
     """One input on one node that easy mode may write to."""
@@ -49,6 +92,17 @@ class Knobs:
     height: list[Target] = field(default_factory=list)
     steps: list[Target] = field(default_factory=list)
     images: list[Target] = field(default_factory=list)
+    controls: list[Control] = field(default_factory=list)
+
+    @property
+    def advanced(self) -> list[Control]:
+        """Everything that does not already have its own control up top.
+
+        Showing the prompt twice -- once in the big box and once in a list of
+        forty inputs -- invites someone to set it in both places and get
+        whichever the code happens to write last.
+        """
+        return [c for c in self.controls if not c.role]
 
     @property
     def takes_text(self) -> bool:
@@ -118,8 +172,16 @@ def _text_source(prompt: dict[str, dict], start: str, seen: frozenset[str]) -> T
     return None
 
 
-def analyse(prompt: dict[str, dict]) -> Knobs:
-    """Work out what can be driven in an already-converted graph."""
+def analyse(prompt: dict[str, dict], specs: dict | None = None) -> Knobs:
+    """Work out what can be driven in an already-converted graph.
+
+    ``specs`` is the engine's /object_info, read by convert.specs_from_object_info.
+    Without it the roles below are still found -- they are inferred from the
+    values -- but the full control list is empty, because the type and bounds
+    of an input are not knowable from its current value alone. A width of 1024
+    is an int; whether it is a slider from 16 to 16384 in steps of 8, or a
+    dropdown, only the engine can say.
+    """
     knobs = Knobs()
 
     for node_id, node in prompt.items():
@@ -139,9 +201,20 @@ def analyse(prompt: dict[str, dict]) -> Knobs:
         if isinstance(inputs.get("steps"), int):
             knobs.steps.append(Target(node_id, "steps", inputs["steps"]))
 
-        # LoadImage's widget is the filename of something already uploaded.
-        if node.get("class_type") == "LoadImage" and "image" in inputs:
-            knobs.images.append(Target(node_id, "image", inputs.get("image")))
+        # An input the engine marks with image_upload takes a picture that has
+        # been sent to it. Asked of the engine rather than matched on the class
+        # name: LoadImage is not the only node with one, and a table of class
+        # names here would go stale the first time a workflow used another.
+        spec = (specs or {}).get(node.get("class_type"))
+        for name, value in inputs.items():
+            if isinstance(value, list):
+                continue                    # driven by another node
+            detail = spec.spec_for(name) if spec else None
+            if detail is not None and detail.options.get("image_upload"):
+                knobs.images.append(Target(node_id, name, value))
+            elif spec is None and node.get("class_type") == "LoadImage" and name == "image":
+                # No object_info to ask; fall back to the node everyone knows.
+                knobs.images.append(Target(node_id, name, value))
 
         for slot, bucket in (("positive", knobs.positive), ("negative", knobs.negative)):
             upstream = _ref(inputs.get(slot))
@@ -156,7 +229,61 @@ def analyse(prompt: dict[str, dict]) -> Knobs:
     # negative prompt would silently replace what the user asked for.
     positive_ids = {t.node_id for t in knobs.positive}
     knobs.negative = [t for t in knobs.negative if t.node_id not in positive_ids]
+
+    if specs:
+        knobs.controls = _controls(prompt, specs, knobs)
     return knobs
+
+
+def _roles_by_key(knobs: Knobs) -> dict[tuple[str, str], str]:
+    """Which inputs already have a friendly control of their own."""
+    named = {
+        "prompt": knobs.positive, "negative": knobs.negative,
+        "width": knobs.width, "height": knobs.height,
+        "steps": knobs.steps, "seed": knobs.seeds, "image": knobs.images,
+    }
+    return {(t.node_id, t.input_name): role
+            for role, targets in named.items() for t in targets}
+
+
+def _controls(prompt: dict[str, dict], specs: dict, knobs: Knobs) -> list[Control]:
+    """Every input the user could reasonably change, in graph order."""
+    roles = _roles_by_key(knobs)
+    found: list[Control] = []
+
+    for node_id, node in prompt.items():
+        spec = specs.get(node.get("class_type"))
+        if spec is None:
+            continue
+        title = (node.get("_meta") or {}).get("title") or node.get("class_type", "")
+        inputs = node.get("inputs", {})
+
+        for name in spec.inputs:
+            if name in NEVER_OFFER:
+                continue
+            detail = spec.spec_for(name)
+            if detail is None or not detail.is_widget:
+                continue
+            value = inputs.get(name)
+            # A connected input is driven by another node; offering a box for
+            # it would be offering a value the engine is going to ignore.
+            if isinstance(value, list):
+                continue
+            options = detail.options or {}
+            found.append(Control(
+                node_id=node_id,
+                input_name=name,
+                node_title=title,
+                kind=detail.kind,
+                value=value if value is not None else options.get("default"),
+                choices=detail.choices,
+                minimum=options.get("min"),
+                maximum=options.get("max"),
+                step=options.get("step"),
+                tooltip=str(options.get("tooltip") or ""),
+                role=roles.get((node_id, name), ""),
+            ))
+    return found
 
 
 @dataclass
@@ -170,6 +297,9 @@ class Settings:
     steps: int | None = None
     seed: int | None = None          # None means "pick a new one"
     image: str | None = None         # a filename already uploaded to the engine
+    # Anything else the user changed, keyed by (node id, input name). This is
+    # what makes every setting reachable rather than the six with names.
+    overrides: dict[tuple[str, str], Any] = field(default_factory=dict)
 
 
 def apply(prompt: dict[str, dict], knobs: Knobs, settings: Settings) -> dict[str, dict]:
@@ -199,6 +329,12 @@ def apply(prompt: dict[str, dict], knobs: Knobs, settings: Settings) -> dict[str
         write(knobs.steps, settings.steps)
     if settings.image is not None:
         write(knobs.images, settings.image)
+
+    # Written after the named ones: an explicit edit in the settings list is
+    # the user being specific, and should win over anything inferred.
+    for (node_id, input_name), value in (settings.overrides or {}).items():
+        if node_id in out:
+            out[node_id]["inputs"][input_name] = value
 
     # Always write a seed. Leaving the template's means pressing the button
     # twice gives the identical picture, which reads as the button being

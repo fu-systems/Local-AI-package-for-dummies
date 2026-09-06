@@ -32,7 +32,7 @@ No part of ComfyUI is imported.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +59,45 @@ class ConversionError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class InputSpec:
+    """One input, as the engine describes it.
+
+    The options are kept, not just the type. They are what lets a settings
+    screen show a slider with the right bounds, a dropdown with the real
+    choices and a multi-line box for a prompt -- all of it from the engine's
+    own description, so a node we have never heard of still gets sensible
+    controls.
+    """
+
+    name: str
+    type: Any                          # "INT", "STRING", ... or a list of choices
+    options: dict = field(default_factory=dict)
+
+    @property
+    def is_widget(self) -> bool:
+        return _is_widget(self.type)
+
+    @property
+    def choices(self) -> tuple[str, ...]:
+        return tuple(str(c) for c in self.type) if isinstance(self.type, list) else ()
+
+    @property
+    def kind(self) -> str:
+        """What sort of control this wants."""
+        if self.choices:
+            return "choice"
+        if self.type == "BOOLEAN":
+            return "bool"
+        if self.type == "FLOAT":
+            return "float"
+        if self.type == "INT":
+            return "int"
+        if self.type == "STRING":
+            return "text" if self.options.get("multiline") else "string"
+        return "wired"                 # arrives down a link, not typed in
+
+
+@dataclass(frozen=True)
 class NodeSpec:
     """What the engine says a node class accepts."""
 
@@ -66,10 +105,14 @@ class NodeSpec:
     inputs: tuple[str, ...]          # every valid backend input, in order
     widget_slots: tuple[str, ...]    # the editor's widget order, with synthetics
     output_types: tuple[str, ...] = ()
+    specs: tuple[InputSpec, ...] = ()
 
     @property
     def input_set(self) -> frozenset[str]:
         return frozenset(self.inputs)
+
+    def spec_for(self, input_name: str) -> InputSpec | None:
+        return next((s for s in self.specs if s.name == input_name), None)
 
 
 def _is_widget(type_: Any) -> bool:
@@ -93,13 +136,16 @@ def specs_from_object_info(doc: dict) -> dict[str, NodeSpec]:
 
         names: list[str] = []
         slots: list[str] = []
+        details: list[InputSpec] = []
         for input_name, definition in ordered:
             names.append(input_name)
             if not isinstance(definition, (list, tuple)) or not definition:
+                details.append(InputSpec(input_name, None, {}))
                 continue
             type_ = definition[0]
             options = definition[1] if len(definition) > 1 and isinstance(
                 definition[1], dict) else {}
+            details.append(InputSpec(input_name, type_, options))
             if _is_widget(type_):
                 slots.append(input_name)
                 if options.get("control_after_generate"):
@@ -110,6 +156,7 @@ def specs_from_object_info(doc: dict) -> dict[str, NodeSpec]:
             inputs=tuple(names),
             widget_slots=tuple(slots),
             output_types=tuple(info.get("output") or ()),
+            specs=tuple(details),
         )
     return specs
 

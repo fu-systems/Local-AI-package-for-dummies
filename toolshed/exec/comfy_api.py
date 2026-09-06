@@ -125,6 +125,45 @@ class ComfyClient:
             filename=item.filename, subfolder=item.subfolder, type=item.type)
         return self._url(f"/view?{params}")
 
+    def upload_image(self, path: Path, *, subfolder: str = "") -> str:
+        """Put a local picture where the engine can load it, and say what to
+        call it.
+
+        A workflow that starts from a photo -- turning one into a 3D model, or
+        editing it -- needs the file inside ComfyUI's input directory, which
+        may be on another machine as far as this API is concerned. So it goes
+        over ``POST /upload/image`` (multipart, field name ``image``) exactly
+        as the editor's own uploader does.
+
+        Overwrite is deliberately not set. Without it the engine compares
+        hashes, reuses the name when the file is identical, and otherwise picks
+        an unused one -- so uploading the same photo twice does not pile up
+        copies, and a different photo never quietly replaces someone else's.
+        The name it chose is what LoadImage wants, prefixed by the subfolder
+        when there is one.
+        """
+        import mimetypes
+
+        data = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        try:
+            reply = httpx.post(
+                self._url("/upload/image"), timeout=HTTP_TIMEOUT,
+                files={"image": (path.name, data, mime)},
+                data={"type": "input", "subfolder": subfolder})
+            reply.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ComfyError(f"Could not send {path.name} to ComfyUI.",
+                             reason_key="upload_failed", detail=str(exc)) from exc
+
+        body = reply.json()
+        name = body.get("name")
+        if not name:
+            raise ComfyError("ComfyUI accepted the picture but did not name it.",
+                             reason_key="upload_unnamed")
+        folder = body.get("subfolder") or ""
+        return f"{folder}/{name}" if folder else name
+
     def download(self, item: Output, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         reply = httpx.get(self.view_url(item), timeout=HTTP_TIMEOUT)

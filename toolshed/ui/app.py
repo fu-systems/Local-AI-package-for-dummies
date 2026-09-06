@@ -330,6 +330,8 @@ class MainWindow(QtWidgets.QMainWindow):
         It holds the graphics card and the port, and a user who closed Toolshed
         has no way left to stop it short of the task manager.
         """
+        if self.make_page:
+            self.make_page.shutdown()
         if self.launch_page and self.launch_page.is_running:
             self.launch_page.stop_engine()
         super().closeEvent(event)
