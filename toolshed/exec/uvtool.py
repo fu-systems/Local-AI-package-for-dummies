@@ -98,14 +98,60 @@ def install_python(
                env=uv_env(runtime_dir), timeout=900, on_line=log)
 
 
-def create_venv(uv: Path, runtime_dir: Path, version: str, *, log: LogFn | None = None) -> Result:
-    return run([uv, "venv", "--python", version, str(runtime_dir / "venv")],
-               env=uv_env(runtime_dir), timeout=600, on_line=log)
+def create_venv(
+    uv: Path,
+    runtime_dir: Path,
+    version: str,
+    *,
+    clear: bool = False,
+    log: LogFn | None = None,
+) -> Result:
+    """Create the virtual environment the engine runs in.
+
+    ``clear`` replaces whatever is at the target path. uv refuses by default if
+    anything is there, which is correct for a one-shot command and wrong for an
+    installer: a run interrupted anywhere after this step would otherwise be
+    unable to start again. The caller decides, having first checked whether the
+    existing environment is usable.
+
+    ``--force`` is deliberately never passed. It lets ``--clear`` delete a
+    directory that is not a virtual environment at all, and a bug that reaches
+    it would delete a folder of the user's making.
+    """
+    cmd: list[str | Path] = [uv, "venv", "--python", version]
+    if clear:
+        cmd.append("--clear")
+    cmd.append(str(runtime_dir / "venv"))
+    return run(cmd, env=uv_env(runtime_dir), timeout=600, on_line=log)
 
 
 def venv_python(runtime_dir: Path) -> Path:
     venv = runtime_dir / "venv"
     return venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
+def venv_python_version(runtime_dir: Path) -> str | None:
+    """``"3.12"`` if a working virtual environment is already there, else None.
+
+    Asks the interpreter rather than reading pyvenv.cfg, because the question
+    that matters is whether it *runs*. A venv whose interpreter was deleted, or
+    which points at a Python that has since been removed, has a perfectly
+    well-formed config file and cannot execute anything.
+
+    Never raises: every answer other than a working interpreter is None.
+    """
+    python = venv_python(runtime_dir)
+    if not python.is_file():
+        return None
+    try:
+        result = run([python, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+                     timeout=60)
+    except OSError:
+        return None
+    if not result.ok:
+        return None
+    line = next((ln.strip() for ln in reversed(result.stdout.splitlines()) if ln.strip()), "")
+    return line or None
 
 
 def pip_install(

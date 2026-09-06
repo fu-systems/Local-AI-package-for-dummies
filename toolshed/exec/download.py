@@ -223,7 +223,7 @@ def download_file(
     part = (part_dir or dest.parent) / (dest.name + ".part")
     part.parent.mkdir(parents=True, exist_ok=True)
 
-    if dest.exists() and sha256 and _hash_file(dest) == sha256:
+    if dest.exists() and sha256 and file_digest(dest) == sha256:
         return sha256  # already here and verified; nothing to do
 
     check_space(dest.parent, size_bytes or remote_size(url, token=token, client=client))
@@ -276,7 +276,9 @@ def download_file(
             client.close()
 
 
-def _hash_file(path: Path) -> str:
+def file_digest(path: Path) -> str:
+    """sha256 of a file on disk, read in chunks so a 20 GB model does not have
+    to fit in memory."""
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for block in iter(lambda: fh.read(CHUNK), b""):
