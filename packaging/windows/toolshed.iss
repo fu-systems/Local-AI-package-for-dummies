@@ -87,16 +87,88 @@ Type: filesandordirs; Name: "{app}\_internal"
 Type: dirifempty;     Name: "{app}"
 
 [Code]
-procedure CurUninstallStepChanged(CurStep: TUninstallStep);
+// Remove Toolshed completely, keeping only the models.
+//
+// The data root lives outside {app} by design, and the uninstaller used to
+// leave every byte of it -- so a reinstall landed on top of a half-finished
+// one and inherited its problems: a Python workspace built by an interrupted
+// run, a manifest describing files that were gone, an engine tree from a
+// different version.
+//
+// Models are the exception, and only models. They are tens of gigabytes and
+// re-downloading them is the slowest part of any reinstall.
+//
+// Kept in step with packaging/linux/uninstall.sh by a test; the two must name
+// the same folder to keep and find the data root the same way.
+
+function DataRoot(): String;
 begin
-  // The data root -- models and outputs, tens of gigabytes -- lives OUTSIDE
-  // {app} by design and is never touched here. Say so out loud: someone who
-  // uninstalls to reclaim space and finds 45 GB still on disk will reasonably
-  // conclude the uninstaller is broken.
+  Result := GetEnv('TOOLSHED_ROOT');
+  if Result = '' then
+    Result := ExpandConstant('{%SYSTEMDRIVE|C:}\Toolshed');
+end;
+
+procedure PurgeDataRoot();
+var
+  Root, Keep, Item: String;
+  Search: TFindRec;
+begin
+  Root := DataRoot();
+  Keep := 'models';
+
+  // Deleting trees: refuse anywhere that is not plainly our own folder. A
+  // missing SYSTEMDRIVE would otherwise leave a root-relative path here.
+  if (Root = '') or (Pos('Toolshed', Root) = 0) then
+    Exit;
+  if not DirExists(Root) then
+    Exit;
+
+  if not DirExists(Root + '\' + Keep) then
+  begin
+    DelTree(Root, True, True, True);
+    Exit;
+  end;
+
+  if FindFirst(Root + '\*', Search) then
+  begin
+    try
+      repeat
+        if (Search.Name = '.') or (Search.Name = '..') then
+          Continue;
+        if CompareText(Search.Name, Keep) = 0 then
+          Continue;
+        Item := Root + '\' + Search.Name;
+        // DirExists rather than the attribute bits: it is documented, and
+        // this file cannot be compiled or run anywhere but Windows, so it
+        // uses only functions whose behaviour is not in question.
+        if DirExists(Item) then
+          DelTree(Item, True, True, True)
+        else
+          DeleteFile(Item);
+      until not FindNext(Search);
+    finally
+      FindClose(Search);
+    end;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurStep: TUninstallStep);
+var
+  Root: String;
+begin
   if CurStep = usPostUninstall then
-    MsgBox('Toolshed has been removed.'#13#10#13#10 +
-           'Your models and the things you made were NOT deleted. They are still ' +
-           'in the folder you chose during setup. Delete that folder yourself if ' +
-           'you want the disk space back.',
-           mbInformation, MB_OK);
+  begin
+    Root := DataRoot();
+    PurgeDataRoot();
+    if DirExists(Root + '\models') then
+      MsgBox('Toolshed has been removed.'#13#10#13#10 +
+             'Your models were kept, in ' + Root + '\models.'#13#10 +
+             'Nothing else was left anywhere. Delete that folder too if you ' +
+             'want the disk space back.',
+             mbInformation, MB_OK)
+    else
+      MsgBox('Toolshed has been removed.'#13#10#13#10 +
+             'Nothing was left anywhere.',
+             mbInformation, MB_OK);
+  end;
 end;
