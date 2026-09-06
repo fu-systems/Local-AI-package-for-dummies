@@ -171,3 +171,115 @@ def test_the_no_agent_builds_rule_is_written_down():
         header = (REPO / ".github" / "workflows" / f"{name}.yml").read_text()[:1200]
         assert "NO AI AGENT MAY EVER TRIGGER A BUILD" in header.upper(), \
             f"{name}.yml header is missing the rule"
+
+
+# --- Dependencies: one source of truth ---------------------------------------
+#
+# Three CI failures on main came from the same mistake: a new third-party
+# import whose package was in pyproject.toml (so `pip install .` in the build
+# workflows had it) but not in ci.yml's hand-typed list. pyyaml, then PySide6,
+# then httpx. Each was found by a red main rather than by a test.
+#
+# Both halves are now asserted here: that everything imported is declared, and
+# that CI installs what is declared rather than retyping it.
+
+# Import name -> distribution name, where they differ. Kept explicit rather
+# than resolved through importlib.metadata, so the check works from a bare
+# checkout with nothing installed.
+IMPORT_TO_DISTRIBUTION = {
+    "yaml": "pyyaml",
+    "PySide6": "pyside6-essentials",
+}
+
+
+def declared_dependencies() -> set[str]:
+    """Distribution names from pyproject's [project].dependencies, normalised
+    per PEP 503 and stripped of version specifiers and extras."""
+    import tomllib
+
+    data = tomllib.loads((REPO / "pyproject.toml").read_text())
+    names = set()
+    for spec in data["project"]["dependencies"]:
+        name = re.split(r"[<>=!~;\[\s]", spec, maxsplit=1)[0]
+        names.add(re.sub(r"[-_.]+", "-", name).lower())
+    return names
+
+
+def third_party_imports_under(package: Path) -> dict[str, set[str]]:
+    """Top-level module name -> the files that import it, for every import in
+    `package` that is neither stdlib nor first-party."""
+    import ast
+    import sys
+
+    found: dict[str, set[str]] = {}
+    for path in sorted(package.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                # level > 0 is a relative import, which is first-party by
+                # definition and has no module name to resolve.
+                roots = [node.module.split(".")[0]] if node.level == 0 and node.module else []
+            else:
+                continue
+            for root in roots:
+                if root in sys.stdlib_module_names or root == "toolshed":
+                    continue
+                found.setdefault(root, set()).add(str(path.relative_to(REPO)))
+    return found
+
+
+def test_every_third_party_import_is_a_declared_dependency():
+    """The check that would have caught httpx before it reached main.
+
+    An import the project does not declare works fine on the machine that has
+    it installed and fails everywhere else -- which is precisely how this
+    failed three times, each time discovered by CI going red after a merge.
+    """
+    declared = declared_dependencies()
+    undeclared = {
+        module: sorted(files)
+        for module, files in third_party_imports_under(REPO / "toolshed").items()
+        if IMPORT_TO_DISTRIBUTION.get(module, module).replace("_", "-").lower() not in declared
+    }
+    assert not undeclared, (
+        f"imported but not in pyproject.toml [project].dependencies: {undeclared}. "
+        f"Add the distribution there -- do not add it to a workflow -- or the "
+        f"frozen build and CI will disagree about what the app needs."
+    )
+
+
+def test_ci_installs_the_project_rather_than_naming_packages():
+    """ci.yml must get its dependencies from pyproject.toml.
+
+    Naming packages in the workflow creates a second, silently-drifting list.
+    That list is what was missing pyyaml, then PySide6, then httpx.
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / "ci.yml").read_text())
+    runs = [
+        step.get("run", "")
+        for job in doc["jobs"].values()
+        for step in job.get("steps", [])
+    ]
+    installs = [
+        line.strip()
+        for run in runs
+        for line in run.splitlines()
+        if re.search(r"\bpip install\b", line) and not line.strip().startswith("#")
+    ]
+    assert installs, "ci.yml installs nothing"
+
+    assert any(re.search(r'pip install .*-e ["\']?\.', line) for line in installs), \
+        "ci.yml must install the project itself, e.g. `pip install -e \".[dev]\"`"
+
+    # Anything that is neither the project, an extra of it, nor pip itself is a
+    # hand-typed package name and therefore a second source of truth.
+    allowed = re.compile(r'pip install\s+(--upgrade\s+pip|(--upgrade\s+)?-e\s+["\']?\.)')
+    offenders = [line for line in installs if not allowed.search(line)]
+    assert not offenders, (
+        f"ci.yml names packages by hand: {offenders}. "
+        f"Declare them in pyproject.toml instead; CI installs from there."
+    )

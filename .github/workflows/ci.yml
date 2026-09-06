@@ -35,8 +35,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgl1 libegl1 libglib2.0-0 libxkbcommon0 libxcb-cursor0
 
-      - name: Install dev dependencies
-        run: python -m pip install pytest ruff pyyaml PySide6-Essentials
+      # Install the project, never a hand-typed list of package names. That
+      # list drifted from pyproject.toml three times -- pyyaml, then PySide6,
+      # then httpx -- and each time the failure landed on main, because the
+      # build workflows do `pip install .` and had the dependency while CI did
+      # not. One source of truth, and adding a dependency needs no CI edit.
+      #
+      # -e here, unlike the builds, on purpose: tests must exercise the working
+      # tree, not a copy of it installed into site-packages.
+      - name: Install the project and its dev tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
 
       - name: Qt must be importable
         # A guard, not a formality. The UI tests use pytest.importorskip, so a
