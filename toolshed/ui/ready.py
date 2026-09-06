@@ -1,9 +1,4 @@
-"""The confirmation screen: exactly what is about to happen, and where.
-
-It is also, for now, where the built product stops. That boundary is stated on
-the screen rather than hidden behind a button that does nothing, because a
-button that silently does nothing is what makes software feel broken.
-"""
+"""The confirmation screen: exactly what is about to happen, and where."""
 
 from __future__ import annotations
 
@@ -45,12 +40,12 @@ class ReadyPage(QtWidgets.QWidget):
         self.plan.setReadOnly(True)
         layout.addWidget(self.plan, 1)
 
-        # Say plainly where the finished product ends and the unfinished one
-        # begins. The alternative is a Set it up button that does nothing.
+        # What pressing the button will actually do, before it is pressed.
         notice = QtWidgets.QLabel(
-            "<b>This is as far as Toolshed goes today.</b> Choosing what to make works; "
-            "downloading and setting it up is still being built. Nothing has been "
-            "downloaded and nothing on your computer has been changed."
+            "Nothing has been downloaded yet. When you press <b>Set it up</b> we will "
+            "install a private copy of Python and the AI engine, fetch the models above, "
+            "and add the ready-made workflows. You can stop at any point and pick up "
+            "where you left off."
         )
         notice.setWordWrap(True)
         notice.setContentsMargins(0, 6, 0, 0)

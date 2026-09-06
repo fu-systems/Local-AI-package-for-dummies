@@ -1,0 +1,168 @@
+"""Providing Python, without touching whatever Python the user already has.
+
+uv is a single static binary that needs no system Python and no admin rights.
+It installs a relocatable interpreter of our choosing and creates the virtual
+environment the engine runs in, entirely inside the data root, so uninstalling
+is deleting a folder.
+
+Everything here is invoked by absolute path. A GUI launched from a file manager
+inherits a stale environment, and resolving tools from PATH is how installers
+end up reporting that a program is missing when it is plainly installed.
+"""
+
+from __future__ import annotations
+
+import platform
+import sys
+import tarfile
+import zipfile
+from collections.abc import Callable
+from pathlib import Path
+
+from toolshed.exec.download import download_file
+from toolshed.exec.proc import Result, run
+
+UV_VERSION = "0.12.10"
+UV_BASE = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}"
+
+LogFn = Callable[[str], None]
+
+
+def uv_asset() -> tuple[str, str]:
+    """(asset filename, path of the binary inside it) for this machine."""
+    machine = platform.machine().lower()
+    if sys.platform == "win32":
+        arch = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
+        return f"uv-{arch}-pc-windows-msvc.zip", "uv.exe"
+    if sys.platform == "darwin":  # not supported, but do not lie about the name
+        arch = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
+        return f"uv-{arch}-apple-darwin.tar.gz", "uv"
+    arch = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
+    return f"uv-{arch}-unknown-linux-gnu.tar.gz", "uv"
+
+
+def uv_path(runtime_dir: Path) -> Path:
+    return runtime_dir / "uv" / ("uv.exe" if sys.platform == "win32" else "uv")
+
+
+def ensure_uv(runtime_dir: Path, *, log: LogFn | None = None) -> Path:
+    """Download and unpack uv if it is not already there."""
+    target = uv_path(runtime_dir)
+    if target.is_file():
+        return target
+
+    asset, inner = uv_asset()
+    archive = runtime_dir / "uv" / asset
+    if log:
+        log(f"Fetching uv {UV_VERSION}")
+    download_file(f"{UV_BASE}/{asset}", archive)
+
+    extract_to = archive.parent
+    if asset.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(extract_to)
+    else:
+        with tarfile.open(archive) as tf:
+            # filter="data" refuses absolute paths and traversal in the archive.
+            tf.extractall(extract_to, filter="data")
+
+    found = next((p for p in extract_to.rglob(inner) if p.is_file()), None)
+    if found is None:
+        raise FileNotFoundError(f"{inner} not found inside {asset}")
+    if found != target:
+        found.replace(target)
+    target.chmod(0o755)
+    archive.unlink(missing_ok=True)
+    return target
+
+
+def uv_env(runtime_dir: Path) -> dict[str, str]:
+    """Keep every byte uv writes inside the data root.
+
+    The cache must share a filesystem with the venv: otherwise uv silently
+    falls back to copying instead of linking, which triples install time and
+    disk use on a machine with a separate drive for models.
+    """
+    return {
+        "UV_CACHE_DIR": str(runtime_dir / "uv-cache"),
+        "UV_PYTHON_INSTALL_DIR": str(runtime_dir / "python"),
+        "UV_HTTP_TIMEOUT": "600",
+        "UV_NO_PROGRESS": "1",
+    }
+
+
+def install_python(
+    uv: Path, runtime_dir: Path, version: str, *, log: LogFn | None = None
+) -> Result:
+    return run([uv, "python", "install", version],
+               env=uv_env(runtime_dir), timeout=900, on_line=log)
+
+
+def create_venv(uv: Path, runtime_dir: Path, version: str, *, log: LogFn | None = None) -> Result:
+    return run([uv, "venv", "--python", version, str(runtime_dir / "venv")],
+               env=uv_env(runtime_dir), timeout=600, on_line=log)
+
+
+def venv_python(runtime_dir: Path) -> Path:
+    venv = runtime_dir / "venv"
+    return venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
+def pip_install(
+    uv: Path,
+    runtime_dir: Path,
+    packages: list[str],
+    *,
+    index_url: str | None = None,
+    log: LogFn | None = None,
+    timeout: float = 1800,
+) -> Result:
+    """Install into our venv.
+
+    ``--index-url``, never ``--extra-index-url``: with an extra index the
+    resolver may legitimately prefer the PyPI wheel, and torch's Windows PyPI
+    wheel is the CPU build. That single flag is the most common cause of
+    "Torch not compiled with CUDA enabled".
+    """
+    cmd: list[str | Path] = [uv, "pip", "install", "--python", venv_python(runtime_dir)]
+    if index_url:
+        cmd += ["--index-url", index_url]
+    cmd += packages
+    return run(cmd, env=uv_env(runtime_dir), timeout=timeout, on_line=log)
+
+
+TORCH_PROBE = (
+    "import json,torch;"
+    "print(json.dumps({'version':torch.__version__,'cuda':torch.version.cuda,"
+    "'hip':getattr(torch.version,'hip',None),'available':torch.cuda.is_available(),"
+    "'devices':torch.cuda.device_count()}))"
+)
+
+
+def verify_torch(
+    runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None
+) -> tuple[bool, str]:
+    """Prove the graphics card is really usable before downloading 40 GB.
+
+    Catching a CPU-only build here costs ninety seconds. Catching it after the
+    models costs an hour and the user's patience.
+    """
+    result = run([venv_python(runtime_dir), "-c", TORCH_PROBE], timeout=300, on_line=log)
+    if not result.ok:
+        return False, "PyTorch could not be loaded at all."
+
+    import json
+
+    line = next((ln for ln in reversed(result.stdout.splitlines())
+                 if ln.strip().startswith("{")), "")
+    try:
+        info = json.loads(line)
+    except json.JSONDecodeError:
+        return False, "PyTorch did not report its configuration."
+
+    if not info.get("available") or not info.get("devices"):
+        return False, "PyTorch is installed but cannot see your graphics card."
+    if expect_tag and expect_tag not in info.get("version", ""):
+        return False, (f"The wrong PyTorch build was installed "
+                       f"({info.get('version')}, expected {expect_tag}).")
+    return True, f"{info.get('version')} sees {info.get('devices')} device(s)."
