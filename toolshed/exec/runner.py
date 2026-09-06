@@ -231,11 +231,16 @@ class Runner:
         self.manifest.torch_index = index
 
     def _verify_torch(self, step: Step) -> None:
-        ok, message = uvtool.verify_torch(self.runtime, step.payload.get("expect_tag", ""),
-                                          log=self._log)
-        if not ok:
-            raise InstallFailed(message, step=step, reason_key="torch_unusable")
-        self._emit("log", message=message)
+        check = uvtool.verify_torch(self.runtime, step.payload.get("expect_tag", ""),
+                                    log=self._log)
+        if not check.ok:
+            raise InstallFailed(check.message, step=step, reason_key="torch_unusable")
+        if check.warning:
+            # Recorded as well as logged: a build that is not the one we asked
+            # for is worth knowing about later, when something behaves oddly.
+            self.manifest.notes.append(check.warning)
+            self._log(check.warning)
+        self._log(check.message)
 
     def _fetch_engine(self, step: Step) -> None:
         tag = step.payload["tag"]

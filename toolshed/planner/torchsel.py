@@ -59,14 +59,27 @@ class TorchChoice:
 
     @property
     def expected_local_tag(self) -> str:
-        """The marker that must appear in torch.__version__ afterwards.
+        """The local version marker expected in torch.__version__ afterwards.
 
-        Verifying this is what turns "we think we installed a GPU build" into
-        "we know we did".
+        It is the last path segment of the index URL, verbatim. PyTorch names
+        the wheel's local version after the index it is published under, so
+        .../whl/rocm7.2 gives 2.14.0+rocm7.2 and .../whl/cu130 gives +cu130.
+
+        The dot is not incidental. This used to strip dots before comparing,
+        which produced "+rocm72" -- a string that has never existed -- and a
+        working two-GPU ROCm install was rejected at 26% with
+
+            The wrong PyTorch build was installed
+            (2.14.0+rocm7.2, expected +rocm72)
+
+        It went unnoticed because CUDA segments contain no dots, so the bug was
+        invisible on every NVIDIA path and only ever fired on AMD. Derived from
+        the URL rather than written out by hand so the two cannot drift, and
+        confirmed against a real install log; see docs/UPSTREAM.md.
         """
         if not self.index_url:
             return ""
-        return "+" + self.index_url.rsplit("/", 1)[-1].replace(".", "")
+        return "+" + self.index_url.rsplit("/", 1)[-1]
 
 
 def _version_at_least(have: str, want: str) -> bool:

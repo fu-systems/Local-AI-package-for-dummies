@@ -17,6 +17,7 @@ import sys
 import tarfile
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from toolshed.exec.download import download_file
@@ -185,17 +186,35 @@ TORCH_PROBE = (
 )
 
 
-def verify_torch(
-    runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None
-) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class TorchCheck:
+    """The outcome of looking at the PyTorch that was just installed."""
+
+    ok: bool
+    message: str
+    warning: str = ""
+
+
+def verify_torch(runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None) -> TorchCheck:
     """Prove the graphics card is really usable before downloading 40 GB.
 
     Catching a CPU-only build here costs ninety seconds. Catching it after the
-    models costs an hour and the user's patience.
+    models costs an hour and the user's patience. That -- and only that -- is
+    what this step is for, so only that stops the install:
+
+    * PyTorch will not import, or sees no device: **fail**. Nothing downstream
+      can work, and 40 GB of models would be wasted.
+    * PyTorch sees the card but carries a different build tag than we asked
+      for: **warn and carry on**. It works. Refusing here would be rejecting a
+      functioning machine over a string.
+
+    The second case used to be fatal, and killed a healthy two-GPU ROCm install
+    at 26 percent. A check that is stricter than the thing it protects against
+    does not make the install safer, it just makes it fail.
     """
     result = run([venv_python(runtime_dir), "-c", TORCH_PROBE], timeout=300, on_line=log)
     if not result.ok:
-        return False, "PyTorch could not be loaded at all."
+        return TorchCheck(False, "PyTorch could not be loaded at all.")
 
     import json
 
@@ -204,11 +223,18 @@ def verify_torch(
     try:
         info = json.loads(line)
     except json.JSONDecodeError:
-        return False, "PyTorch did not report its configuration."
+        return TorchCheck(False, "PyTorch did not report its configuration.")
 
     if not info.get("available") or not info.get("devices"):
-        return False, "PyTorch is installed but cannot see your graphics card."
-    if expect_tag and expect_tag not in info.get("version", ""):
-        return False, (f"The wrong PyTorch build was installed "
-                       f"({info.get('version')}, expected {expect_tag}).")
-    return True, f"{info.get('version')} sees {info.get('devices')} device(s)."
+        return TorchCheck(False, "PyTorch is installed but cannot see your graphics card.")
+
+    version = info.get("version", "")
+    devices = info.get("devices")
+    plural = "" if devices == 1 else "s"
+    good = f"{version} sees {devices} graphics card{plural}."
+
+    if expect_tag and expect_tag not in version:
+        return TorchCheck(True, good, warning=(
+            f"This is the {version} build; we asked for {expect_tag}. "
+            f"Your card works, so setup is carrying on."))
+    return TorchCheck(True, good)
