@@ -114,3 +114,60 @@ def test_excludes_contain_no_setuptools_alias_targets():
         f"setuptools-vendored copies onto these names and the build dies with "
         f'ValueError: Target module "..." already imported as ExcludedModule'
     )
+
+
+BUILD_WORKFLOWS = ["build-linux", "build-windows"]
+
+
+@pytest.mark.parametrize("name", BUILD_WORKFLOWS)
+def test_builds_are_manual_only(name):
+    """Builds must never start on their own.
+
+    An unbounded wait in a build step, triggered automatically on merge, burned
+    hours of runner time before anyone could react. The owner starts builds and
+    nothing else does -- no push, no pull_request, no tag, no cron, no agent.
+    """
+    import yaml
+
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / f"{name}.yml").read_text())
+    # PyYAML parses the bare key `on` as the boolean True.
+    triggers = doc[True] if True in doc else doc["on"]
+    assert list(triggers) == ["workflow_dispatch"], (
+        f"{name}.yml must be workflow_dispatch only, found {list(triggers)}. "
+        f"See the note at the top of the file, README.md and CLAUDE.md."
+    )
+
+
+@pytest.mark.parametrize("name", ["ci", *BUILD_WORKFLOWS])
+def test_every_job_has_a_timeout(name):
+    """GitHub's default job timeout is 360 minutes. Without an explicit one, a
+    single hung step sits there for six hours burning runner minutes."""
+    import yaml
+
+    doc = yaml.safe_load((REPO / ".github" / "workflows" / f"{name}.yml").read_text())
+    missing = [j for j, cfg in doc["jobs"].items() if not cfg.get("timeout-minutes")]
+    assert not missing, f"{name}.yml jobs without timeout-minutes: {missing}"
+
+
+def test_no_unbounded_process_wait_on_windows():
+    """`Start-Process -Wait` has no deadline. On a headless runner a GUI process
+    that shows a modal dialog waits forever; that is what hung the build."""
+    text = (REPO / ".github" / "workflows" / "build-windows.yml").read_text()
+    offenders = [
+        line.strip()
+        for line in text.splitlines()
+        if "Start-Process" in line and "-Wait" in line and not line.strip().startswith("#")
+    ]
+    assert not offenders, f"unbounded waits: {offenders}"
+
+
+def test_the_no_agent_builds_rule_is_written_down():
+    """The rule has to survive this conversation, so it lives in the files a
+    human reads and the file an agent loads."""
+    needle = "NO AI AGENT MAY EVER TRIGGER A BUILD"
+    for rel in ("README.md", "CLAUDE.md"):
+        assert needle in (REPO / rel).read_text(), f"{rel} is missing the rule"
+    for name in BUILD_WORKFLOWS:
+        header = (REPO / ".github" / "workflows" / f"{name}.yml").read_text()[:1200]
+        assert "NO AI AGENT MAY EVER TRIGGER A BUILD" in header.upper(), \
+            f"{name}.yml header is missing the rule"

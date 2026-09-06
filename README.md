@@ -2,6 +2,25 @@
 
 **Local AI, set up for you.**
 
+---
+
+## ⛔ Builds are triggered manually, by a human, only
+
+**`build-linux` and `build-windows` run on `workflow_dispatch` and nothing else.**
+Do not add `push`, `pull_request`, `schedule`, or tag triggers to them.
+
+**NO AI AGENT MAY EVER TRIGGER A BUILD.** Not by pushing, not by merging, not by
+dispatching a workflow, not by any other means. If a build is needed, say so and let
+a human start it.
+
+To produce installers: open the **Actions** tab, pick **build-linux** or
+**build-windows**, and press **Run workflow**. Nothing else starts a build.
+
+(`ci` — lint and unit tests, about fifteen seconds, no compilation and no artifacts —
+still runs on push and pull request. It is not a build.)
+
+---
+
 An installer that hand-holds a complete beginner through setting up local
 generative AI on **Linux and Windows**. You download one thing, tick boxes for
 what you want to make, and it fetches the right models, puts them in the right
