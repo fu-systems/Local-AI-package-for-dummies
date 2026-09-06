@@ -17,6 +17,7 @@ import sys
 import tarfile
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from toolshed.exec.download import download_file
@@ -98,14 +99,60 @@ def install_python(
                env=uv_env(runtime_dir), timeout=900, on_line=log)
 
 
-def create_venv(uv: Path, runtime_dir: Path, version: str, *, log: LogFn | None = None) -> Result:
-    return run([uv, "venv", "--python", version, str(runtime_dir / "venv")],
-               env=uv_env(runtime_dir), timeout=600, on_line=log)
+def create_venv(
+    uv: Path,
+    runtime_dir: Path,
+    version: str,
+    *,
+    clear: bool = False,
+    log: LogFn | None = None,
+) -> Result:
+    """Create the virtual environment the engine runs in.
+
+    ``clear`` replaces whatever is at the target path. uv refuses by default if
+    anything is there, which is correct for a one-shot command and wrong for an
+    installer: a run interrupted anywhere after this step would otherwise be
+    unable to start again. The caller decides, having first checked whether the
+    existing environment is usable.
+
+    ``--force`` is deliberately never passed. It lets ``--clear`` delete a
+    directory that is not a virtual environment at all, and a bug that reaches
+    it would delete a folder of the user's making.
+    """
+    cmd: list[str | Path] = [uv, "venv", "--python", version]
+    if clear:
+        cmd.append("--clear")
+    cmd.append(str(runtime_dir / "venv"))
+    return run(cmd, env=uv_env(runtime_dir), timeout=600, on_line=log)
 
 
 def venv_python(runtime_dir: Path) -> Path:
     venv = runtime_dir / "venv"
     return venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
+def venv_python_version(runtime_dir: Path) -> str | None:
+    """``"3.12"`` if a working virtual environment is already there, else None.
+
+    Asks the interpreter rather than reading pyvenv.cfg, because the question
+    that matters is whether it *runs*. A venv whose interpreter was deleted, or
+    which points at a Python that has since been removed, has a perfectly
+    well-formed config file and cannot execute anything.
+
+    Never raises: every answer other than a working interpreter is None.
+    """
+    python = venv_python(runtime_dir)
+    if not python.is_file():
+        return None
+    try:
+        result = run([python, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+                     timeout=60)
+    except OSError:
+        return None
+    if not result.ok:
+        return None
+    line = next((ln.strip() for ln in reversed(result.stdout.splitlines()) if ln.strip()), "")
+    return line or None
 
 
 def pip_install(
@@ -139,17 +186,35 @@ TORCH_PROBE = (
 )
 
 
-def verify_torch(
-    runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None
-) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class TorchCheck:
+    """The outcome of looking at the PyTorch that was just installed."""
+
+    ok: bool
+    message: str
+    warning: str = ""
+
+
+def verify_torch(runtime_dir: Path, expect_tag: str, *, log: LogFn | None = None) -> TorchCheck:
     """Prove the graphics card is really usable before downloading 40 GB.
 
     Catching a CPU-only build here costs ninety seconds. Catching it after the
-    models costs an hour and the user's patience.
+    models costs an hour and the user's patience. That -- and only that -- is
+    what this step is for, so only that stops the install:
+
+    * PyTorch will not import, or sees no device: **fail**. Nothing downstream
+      can work, and 40 GB of models would be wasted.
+    * PyTorch sees the card but carries a different build tag than we asked
+      for: **warn and carry on**. It works. Refusing here would be rejecting a
+      functioning machine over a string.
+
+    The second case used to be fatal, and killed a healthy two-GPU ROCm install
+    at 26 percent. A check that is stricter than the thing it protects against
+    does not make the install safer, it just makes it fail.
     """
     result = run([venv_python(runtime_dir), "-c", TORCH_PROBE], timeout=300, on_line=log)
     if not result.ok:
-        return False, "PyTorch could not be loaded at all."
+        return TorchCheck(False, "PyTorch could not be loaded at all.")
 
     import json
 
@@ -158,11 +223,18 @@ def verify_torch(
     try:
         info = json.loads(line)
     except json.JSONDecodeError:
-        return False, "PyTorch did not report its configuration."
+        return TorchCheck(False, "PyTorch did not report its configuration.")
 
     if not info.get("available") or not info.get("devices"):
-        return False, "PyTorch is installed but cannot see your graphics card."
-    if expect_tag and expect_tag not in info.get("version", ""):
-        return False, (f"The wrong PyTorch build was installed "
-                       f"({info.get('version')}, expected {expect_tag}).")
-    return True, f"{info.get('version')} sees {info.get('devices')} device(s)."
+        return TorchCheck(False, "PyTorch is installed but cannot see your graphics card.")
+
+    version = info.get("version", "")
+    devices = info.get("devices")
+    plural = "" if devices == 1 else "s"
+    good = f"{version} sees {devices} graphics card{plural}."
+
+    if expect_tag and expect_tag not in version:
+        return TorchCheck(True, good, warning=(
+            f"This is the {version} build; we asked for {expect_tag}. "
+            f"Your card works, so setup is carrying on."))
+    return TorchCheck(True, good)

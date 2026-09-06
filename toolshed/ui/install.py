@@ -86,6 +86,12 @@ class InstallPage(QtWidgets.QWidget):
         self.bar.setRange(0, 1000)
         layout.addWidget(self.bar)
 
+        # Shown only when something has gone wrong, to say what is still safe.
+        self.hint = QtWidgets.QLabel()
+        self.hint.setWordWrap(True)
+        self.hint.setVisible(False)
+        layout.addWidget(self.hint)
+
         self.steps_box = QtWidgets.QWidget()
         self.steps_layout = QtWidgets.QVBoxLayout(self.steps_box)
         self.steps_layout.setContentsMargins(0, 0, 0, 0)
@@ -116,6 +122,24 @@ class InstallPage(QtWidgets.QWidget):
         layout.addWidget(self.log)
 
     # -- lifecycle ----------------------------------------------------------
+
+    def reset(self) -> None:
+        """Clear the screen for a fresh run.
+
+        Called before every start, including a retry. Without it the step list
+        would gain a second copy of every row, and the previous run's ticks and
+        crosses would sit above the new ones as though they still described
+        what was happening.
+        """
+        while (item := self.steps_layout.takeAt(0)) is not None:
+            if (widget := item.widget()) is not None:
+                widget.deleteLater()
+        self._rows.clear()
+        self.log.clear()
+        self.bar.setValue(0)
+        self.hint.setVisible(False)
+        self.heading.setText("Setting up")
+        self.current.setText("Starting…")
 
     def start(self, plan: InstallPlan, token: str | None = None) -> None:
         for step in plan.steps:

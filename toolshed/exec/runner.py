@@ -7,6 +7,14 @@ diagnosable state" is the most common complaint about every tool in this space.
 
 Cancellation is cooperative and safe at any point: partial downloads survive as
 .part files and the next run resumes them.
+
+**Every step must be safe to run again.** An install that fetches tens of
+gigabytes will be interrupted -- a closed laptop, a dropped connection, a
+failure three steps later -- so "run it again" is the normal case, not the
+exceptional one. A step that has already been done reports that and returns;
+only a step that finds its work half-finished or wrong does it over. The first
+version of this file got that wrong in one place, and a second run died on
+"a virtual environment already exists" with no way past it.
 """
 
 from __future__ import annotations
@@ -18,9 +26,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from toolshed.exec import inject, uvtool
-from toolshed.exec.download import Cancelled, DownloadError, download_file, remote_size
+from toolshed.exec.download import (
+    Cancelled,
+    DownloadError,
+    download_file,
+    file_digest,
+    remote_size,
+)
 from toolshed.exec.manifest import Entry, Manifest
-from toolshed.planner.plan import ENGINE_TAG, MODEL_DIRS, InstallPlan, Kind, Step
+from toolshed.planner.plan import MODEL_DIRS, InstallPlan, Kind, Step
 
 
 class Level(StrEnum):
@@ -106,9 +120,12 @@ class Runner:
             Kind.WRITE_SETTINGS: self._write_settings,
             Kind.SMOKE_TEST: self._smoke_test,
         }
+        self._refuse_to_run_as_root()
+        # packs is a statement of intent and is true from the start. engine_tag
+        # and torch_index describe what actually landed, so they are written by
+        # the steps that land them -- not here, where they would be a claim
+        # made before the fact and left behind by a failure.
         self.manifest.packs = [p.id for p in self.plan.packs]
-        self.manifest.engine_tag = ENGINE_TAG
-        self.manifest.torch_index = self.plan.torch.index_url
 
         for step in self.plan.steps:
             self._check_cancelled()
@@ -128,6 +145,28 @@ class Runner:
             self.manifest.save()
         return self.manifest
 
+    # -- preflight ----------------------------------------------------------
+
+    def _refuse_to_run_as_root(self) -> None:
+        """Do not let sudo turn a stuck install into a broken home directory.
+
+        Nothing here needs administrator rights: uv, Python, the engine and the
+        models all live under the user's own data root. Running as root writes
+        that whole tree owned by root, and the *next* ordinary run then fails on
+        permissions -- a far worse and far more confusing state than whatever
+        prompted someone to reach for sudo in the first place.
+        """
+        import os
+
+        if hasattr(os, "geteuid") and os.geteuid() == 0 and os.environ.get("SUDO_USER"):
+            raise InstallFailed(
+                "Please run Toolshed normally, not with sudo. Nothing it installs "
+                "needs administrator rights, and installing as root would leave "
+                f"{self.root} owned by root and unusable from your own account.",
+                step=self.plan.steps[0],
+                reason_key="running_as_root",
+            )
+
     # -- steps --------------------------------------------------------------
 
     def _ensure_uv(self, step: Step) -> None:
@@ -141,12 +180,43 @@ class Runner:
                                 step=step)
 
     def _create_venv(self, step: Step) -> None:
-        uv = uvtool.uv_path(self.runtime)
+        """The private workspace: an isolated Python the engine runs inside.
+
+        It exists so that installing PyTorch and ComfyUI's dependencies cannot
+        touch, upgrade or break whatever Python the user already has, and so
+        that uninstalling is deleting one folder.
+
+        An existing one is good news, not an obstacle -- provided it works.
+        Three cases, and only the last one is a failure:
+
+        * it runs and is the right Python -> keep it, say so, move on;
+        * it is there but broken or the wrong version -> replace it;
+        * something is at that path that is not a virtual environment at all
+          -> stop, because deleting it is not ours to decide.
+        """
         from toolshed.planner.plan import PYTHON_VERSION
 
-        result = uvtool.create_venv(uv, self.runtime, PYTHON_VERSION, log=self._log)
+        venv = self.runtime / "venv"
+        existing = uvtool.venv_python_version(self.runtime)
+
+        if existing == PYTHON_VERSION:
+            self._log(f"The private workspace is already here (Python {existing}); keeping it.")
+            return
+
+        if existing:
+            self._log(f"Replacing the workspace: it has Python {existing}, "
+                      f"and the engine needs {PYTHON_VERSION}.")
+        elif venv.exists():
+            self._log("The workspace was left half-made by an earlier run; starting it again.")
+
+        uv = uvtool.uv_path(self.runtime)
+        result = uvtool.create_venv(uv, self.runtime, PYTHON_VERSION,
+                                    clear=venv.exists(), log=self._log)
         if not result.ok:
-            raise InstallFailed("Could not create the private workspace.", step=step)
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            hint = detail[-1] if detail else "see the log"
+            raise InstallFailed(
+                f"Could not create the private workspace at {venv}. {hint}", step=step)
 
     def _install_torch(self, step: Step) -> None:
         index = step.payload.get("index_url")
@@ -158,15 +228,28 @@ class Runner:
             index_url=index, log=self._log, timeout=3600)
         if not result.ok:
             raise InstallFailed("Could not install the graphics card software.", step=step)
+        self.manifest.torch_index = index
 
     def _verify_torch(self, step: Step) -> None:
-        ok, message = uvtool.verify_torch(self.runtime, step.payload.get("expect_tag", ""),
-                                          log=self._log)
-        if not ok:
-            raise InstallFailed(message, step=step, reason_key="torch_unusable")
-        self._emit("log", message=message)
+        check = uvtool.verify_torch(self.runtime, step.payload.get("expect_tag", ""),
+                                    log=self._log)
+        if not check.ok:
+            raise InstallFailed(check.message, step=step, reason_key="torch_unusable")
+        if check.warning:
+            # Recorded as well as logged: a build that is not the one we asked
+            # for is worth knowing about later, when something behaves oddly.
+            self.manifest.notes.append(check.warning)
+            self._log(check.warning)
+        self._log(check.message)
 
     def _fetch_engine(self, step: Step) -> None:
+        tag = step.payload["tag"]
+        # The manifest records the tag only once the tree is fully in place, so
+        # an interrupted extraction is never mistaken for a finished one.
+        if self.manifest.engine_tag == tag and (self.engine / "requirements.txt").is_file():
+            self._log(f"ComfyUI {tag} is already installed; keeping it.")
+            return
+
         self.engine.parent.mkdir(parents=True, exist_ok=True)
         archive = self.root / "state" / "downloads" / f"comfyui-{step.payload['tag']}.tar.gz"
         download_file(step.payload["url"], archive,
@@ -189,6 +272,7 @@ class Runner:
         inner.replace(self.engine)
         shutil.rmtree(staging, ignore_errors=True)
         archive.unlink(missing_ok=True)
+        self.manifest.engine_tag = tag
 
     def _install_engine_reqs(self, step: Step) -> None:
         reqs = self.engine / "requirements.txt"
@@ -210,12 +294,48 @@ class Runner:
                     "state/downloads", "state/logs"):
             (self.root / rel).mkdir(parents=True, exist_ok=True)
 
+    def _already_have(self, target, item) -> bool:
+        """Is this file already here, complete and unchanged since we fetched it?
+
+        Only ``download_file`` can answer that from the catalogue, and only once
+        the catalogue's hashes are frozen; until then every hash is
+        PENDING_FREEZE and it has nothing to compare against. So the manifest
+        answers instead: it recorded what the file hashed to when it landed.
+
+        Checked rather than assumed. Re-hashing 40 GB takes under a minute and
+        catches a truncated or edited file; trusting the record instead would
+        make a re-run quietly build on a corrupt model. The size is compared
+        first because that rules most stale files out without reading them.
+        """
+        if item.hash_is_frozen:
+            return False        # download_file does this check itself, better.
+        if not target.is_file():
+            return False
+        try:
+            key = str(target.relative_to(self.root))
+        except ValueError:
+            return False        # outside the data root; the manifest cannot speak for it
+        prior = next((e for e in self.manifest.files if e.path == key), None)
+        if prior is None or not prior.sha256 or prior.size_bytes != target.stat().st_size:
+            return False
+        self._log(f"Checking {item.filename} is still intact…")
+        return file_digest(target) == prior.sha256
+
     def _download(self, step: Step) -> None:
         pack_id = step.payload.get("id", "")
         done_bytes = 0
         for item in step.downloads:
             self._check_cancelled()
             target = item.dest / item.filename
+
+            # A re-run must not fetch tens of gigabytes it already has. This is
+            # what makes "just start it again" a reasonable thing to tell
+            # someone whose install died two hours in.
+            if self._already_have(target, item):
+                done_bytes += target.stat().st_size
+                self._log(f"{item.filename} is already here; skipping.")
+                continue
+
             size = item.size_bytes or remote_size(item.url, token=self.hf_token)
             self._log(f"{item.filename} ({size / 1e9:.1f} GB)" if size else item.filename)
 

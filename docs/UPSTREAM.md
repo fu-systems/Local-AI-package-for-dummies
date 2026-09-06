@@ -18,6 +18,7 @@ Verified 2026-09-05 against ComfyUI v0.34.0 unless stated otherwise.
 | Latent format `taesd_decoder_name` is undefined for Z-Image, ACE-Step and all TRELLIS.2 formats | `comfy/latent_formats.py` | Live preview expectations for those modalities |
 | `--lowvram` is a no-op while DynamicVRAM is on (the 0.34.0 default); `--novram`/`--highvram` disable DynamicVRAM | `comfy/cli_args.py` help text | Low-VRAM handling; we expose `--reserve-vram` instead |
 | `--database-url` relocates the internal database, which `--base-directory` does not | `comfy/cli_args.py` | DB lands in the disposable engine tree and dies on update |
+| PyTorch names a wheel's local version after the index it is published under, **verbatim including dots**: `.../whl/rocm7.2` installs `2.14.0+rocm7.2`, `.../whl/cu130` installs `+cu130` | install log, AMD gfx1100 on Linux, 2026-09-06 | The post-install torch check; a mangled expectation rejects a working card |
 | `--user-directory` and `--models-directory` are typed `is_valid_directory` and must pre-exist | `comfy/cli_args.py` | Install aborts with a bare argparse usage error |
 | Without `--enable-cors-header`, an origin-only middleware 403s cross-site requests; a native client sends no `Origin` and is unaffected | `server.py` middleware | Why easy mode is native Qt, not a webview |
 | Terminal condition is `executing {node: null, prompt_id}`, sent **after** history is written | `execution.py` / websocket | Generate UI would poll or hang |

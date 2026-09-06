@@ -119,3 +119,65 @@ class TestSelection:
         w._go_next()
         for pack in w.choose_page.selected():
             assert pack.vram_gb_min <= 6
+
+
+class TestAFailedInstallIsNotADeadEnd:
+    """The install died on "a virtual environment already exists" and the only
+    button was Close. Every step is resumable now, so the honest primary offer
+    is Try again -- and it must genuinely resume rather than start over."""
+
+    def _failed_window(self, qapp, reason="step_failed"):
+        window = window_for(AMD_20G)
+        window._on_install_failed("Could not create the private workspace.", reason)
+        return window
+
+    def test_try_again_is_the_primary_button(self, qapp):
+        window = self._failed_window(qapp)
+        assert window.next_button.text() == "Try again"
+        assert window.next_button.isEnabled()
+
+    def test_closing_is_still_offered(self, qapp):
+        window = self._failed_window(qapp)
+        assert window.back_button.text() == "Close"
+
+    def test_the_user_is_told_nothing_is_lost(self, qapp):
+        window = self._failed_window(qapp)
+        assert not window.install_page.hint.isHidden()
+        assert "picks up where this left off" in window.install_page.hint.text()
+
+    def test_the_failure_message_is_shown(self, qapp):
+        window = self._failed_window(qapp)
+        assert "private workspace" in window.install_page.current.text()
+
+    @pytest.mark.parametrize("reason", ["running_as_root", "not_found"])
+    def test_retry_is_not_offered_where_it_would_fail_identically(self, qapp, reason):
+        """Offering a button that is certain to fail again is worse than not
+        offering one. sudo cannot be undone from inside this process, and a
+        model that has moved will not move back."""
+        window = self._failed_window(qapp, reason)
+        assert window.next_button.text() == "Close"
+        assert window.install_page.hint.isHidden()
+
+    def test_sync_nav_does_not_overwrite_the_offer(self, qapp):
+        """_sync_nav runs on several signals and previously knew nothing about
+        the failed state, so it would quietly relabel the button."""
+        window = self._failed_window(qapp)
+        window._sync_nav()
+        assert window.next_button.text() == "Try again"
+
+    def test_retrying_clears_the_previous_attempt_from_the_screen(self, qapp, monkeypatch):
+        """Without a reset the step list gains a second copy of every row and
+        the old crosses sit above the new ticks."""
+        window = self._failed_window(qapp)
+        started = {}
+        monkeypatch.setattr(type(window.install_page), "start",
+                            lambda self, plan, token=None: started.update(plan=plan))
+
+        rows_before = len(window.install_page._rows)
+        window.install_page._rows["stale"] = None
+        window._go_next()
+
+        assert started, "Try again did not start an install"
+        assert "stale" not in window.install_page._rows, "the previous attempt was left on screen"
+        assert not window._failed
+        assert rows_before == 0

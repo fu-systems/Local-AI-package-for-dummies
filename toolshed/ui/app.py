@@ -102,6 +102,16 @@ def _technical_summary(report: HardwareReport) -> str:
     return "\n".join(lines)
 
 
+# Reasons where pressing Try again would produce the identical failure with
+# nothing the user could have changed in between. Offering a button that is
+# certain to fail is worse than not offering one.
+#
+# Deliberately NOT here: terms_required and auth_required (accept the licence
+# on the web, then retry works), torch_unusable (a driver or a group membership
+# fixed outside the app, then retry works), and disk_full (free some space).
+RETRY_IS_POINTLESS = {"running_as_root", "not_found"}
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """A three-step wizard.
 
@@ -165,6 +175,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._installing = False
         self._finished = False
+        self._failed = False
         self.statusBar().showMessage(
             "Nothing you make is sent anywhere." if verdict.supported
             else "Nothing has been downloaded or installed."
@@ -178,6 +189,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # then Set it up, then Stop while work is happening, then Close.
         if self._finished:
             self.close()
+            return
+        if self._failed:
+            self._retry_install()
             return
         if self._installing:
             assert self.install_page
@@ -198,6 +212,7 @@ class MainWindow(QtWidgets.QMainWindow):
         assert self.choose_page and self.install_page
         plan = build_plan(self.report, self.choose_page.selected(), default_data_root())
         self.pages.setCurrentWidget(self.install_page)
+        self.install_page.reset()
         # No going back once bytes are landing on disk; Stop is the way out.
         self.back_button.setVisible(False)
         self.next_button.setText("Stop")
@@ -215,15 +230,45 @@ class MainWindow(QtWidgets.QMainWindow):
         self._finished = True
 
     def _on_install_failed(self, message: str, reason_key: str) -> None:
+        """A failure is a place to carry on from, not a dead end.
+
+        Nothing is lost when a step fails: part-downloaded files survive, the
+        workspace and the engine are kept, and every step checks what is already
+        there before doing it again. So the primary offer is Try again, and it
+        genuinely resumes rather than starting over.
+
+        The one exception is a problem that trying again cannot fix -- sudo,
+        or a model whose terms have to be accepted on the web first. Repeating
+        the same failure on demand is not an offer, it is a loop.
+        """
         self._installing = False
+        self._failed = True
         self.install_page.heading.setText("That did not work")
         self.install_page.current.setText(message)
-        # Nothing is lost: part-downloaded files survive and the next run
-        # resumes them, so the honest offer is to try again.
-        self.next_button.setText("Close")
-        self._finished = True
+
+        if reason_key in RETRY_IS_POINTLESS:
+            self.next_button.setText("Close")
+            self._finished = True
+            return
+
+        self.install_page.hint.setText(
+            "Nothing you have already downloaded is lost. Trying again picks up "
+            "where this left off.")
+        self.install_page.hint.setVisible(True)
+        self.next_button.setText("Try again")
+        self.back_button.setText("Close")
+        self.back_button.setVisible(True)
+
+    def _retry_install(self) -> None:
+        self._failed = False
+        self.install_page.hint.setVisible(False)
+        self.back_button.setText("Back")
+        self._start_install()
 
     def _go_back(self) -> None:
+        if self._failed:
+            self.close()
+            return
         if self.pages.currentIndex() > 0:
             self.pages.setCurrentIndex(self.pages.currentIndex() - 1)
             self._sync_nav()
@@ -237,6 +282,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.next_button.setEnabled(True)
             return
 
+        if self._failed:
+            self.next_button.setText("Try again")
+            self.next_button.setEnabled(True)
+            return
         if self._installing:
             self.next_button.setText("Stop")
             self.next_button.setEnabled(True)
