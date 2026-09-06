@@ -152,9 +152,12 @@ class TestDesktopFileDetection:
     """
 
     def _fn(self):
-        from toolshed.ui.app import _desktop_file_installed
+        # toolshed.desktop, not toolshed.ui.app: this is a filesystem question
+        # and must stay importable without Qt, or CI (which has no PySide6)
+        # cannot run it.
+        from toolshed.desktop import desktop_file_installed
 
-        return _desktop_file_installed
+        return desktop_file_installed
 
     def test_absent_when_no_desktop_file_anywhere(self, tmp_path, monkeypatch):
         monkeypatch.setattr("sys.platform", "linux")
