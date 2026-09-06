@@ -30,11 +30,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as ws_connect
 
 # Long enough for a cold model load inside a single node.
 HTTP_TIMEOUT = httpx.Timeout(30.0, read=300.0)
-WS_MESSAGE_TIMEOUT = 300.0
+# How long the engine may say nothing before we assume it is wedged. Checked
+# in short slices so a Stop is honoured within a second, not at the end of a
+# five-minute model load.
+WS_SILENCE_BUDGET = 300.0
+WS_POLL = 1.0
+# The engine emits execution_success *before* it stores the history entry
+# (execution.py: add_message at 824, history_result set at 831, stored by
+# task_done). Ask a few times rather than read an empty record once.
+HISTORY_ATTEMPTS = 40
+HISTORY_WAIT = 0.25
+
+# Every call here is to the loopback engine. Proxies must not be consulted:
+# httpx honours HTTP(S)_PROXY by default, and behind one every request to
+# 127.0.0.1 was sent to the proxy instead, so readiness never came.
+NO_PROXY = {"trust_env": False}
 
 
 class ComfyError(RuntimeError):
@@ -78,11 +93,14 @@ class Progress:
 ProgressFn = Callable[[Progress], None]
 CancelFn = Callable[[], bool]
 
-# Which history output keys hold files, and what to call them. Read from the
-# save nodes' own output dictionaries rather than assumed: SaveImage writes
-# "images", SaveAudioMP3 writes "audio", SaveVideo writes "video" and
-# Save3DAdvanced writes "3d".
-OUTPUT_KEYS = ("images", "audio", "video", "3d", "gifs", "files")
+# Which history output keys hold files. Read from comfy_api/latest/_ui.py, not
+# assumed: SaveImage writes "images"; SaveAudio writes "audio"; SaveVideo goes
+# through ui.PreviewVideo, which writes "images" with "animated": [true]; the
+# 3D savers go through ui.PreviewUI3D(Advanced), which writes
+# "result": [model_file, camera_info, ...] with model_file a plain filename.
+# The first version of this table had a "3d" key that nothing ever writes, so
+# a finished 3D model was reported as "produced no files".
+OUTPUT_KEYS = ("images", "audio", "video", "gifs", "files")
 
 
 @dataclass
@@ -105,7 +123,7 @@ class ComfyClient:
         release.
         """
         try:
-            reply = httpx.get(self._url("/object_info"), timeout=HTTP_TIMEOUT)
+            reply = httpx.get(self._url("/object_info"), timeout=HTTP_TIMEOUT, trust_env=False)
             reply.raise_for_status()
             return reply.json()
         except httpx.HTTPError as exc:
@@ -114,7 +132,8 @@ class ComfyClient:
 
     def history(self, prompt_id: str) -> dict:
         try:
-            reply = httpx.get(self._url(f"/history/{prompt_id}"), timeout=HTTP_TIMEOUT)
+            reply = httpx.get(self._url(f"/history/{prompt_id}"),
+                              timeout=HTTP_TIMEOUT, trust_env=False)
             reply.raise_for_status()
             return reply.json().get(prompt_id) or {}
         except httpx.HTTPError:
@@ -148,7 +167,7 @@ class ComfyClient:
         mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         try:
             reply = httpx.post(
-                self._url("/upload/image"), timeout=HTTP_TIMEOUT,
+                self._url("/upload/image"), timeout=HTTP_TIMEOUT, trust_env=False,
                 files={"image": (path.name, data, mime)},
                 data={"type": "input", "subfolder": subfolder})
             reply.raise_for_status()
@@ -166,7 +185,7 @@ class ComfyClient:
 
     def download(self, item: Output, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        reply = httpx.get(self.view_url(item), timeout=HTTP_TIMEOUT)
+        reply = httpx.get(self.view_url(item), timeout=HTTP_TIMEOUT, trust_env=False)
         reply.raise_for_status()
         dest.write_bytes(reply.content)
         return dest
@@ -181,7 +200,7 @@ class ComfyClient:
         unpacked rather than swallowed.
         """
         try:
-            reply = httpx.post(self._url("/prompt"), timeout=HTTP_TIMEOUT,
+            reply = httpx.post(self._url("/prompt"), timeout=HTTP_TIMEOUT, trust_env=False,
                                json={"prompt": prompt, "client_id": self.client_id})
         except httpx.HTTPError as exc:
             raise ComfyError("Could not reach ComfyUI.", reason_key="unreachable",
@@ -199,7 +218,8 @@ class ComfyClient:
     def interrupt(self) -> None:
         # Best effort: the caller is leaving either way, and a stop that cannot
         # be delivered must not become an error on the way out.
-        with httpx.Client(timeout=10.0) as client, contextlib.suppress(httpx.HTTPError):
+        with httpx.Client(timeout=10.0, trust_env=False) as client, \
+                contextlib.suppress(httpx.HTTPError):
             client.post(self._url("/interrupt"))
 
     def run(
@@ -218,19 +238,32 @@ class ComfyClient:
         waiting for messages that have already been and gone.
         """
         titles = titles or {}
+        import time
+
         with ws_connect(self._ws_url(), open_timeout=30) as socket:
             prompt_id = self.submit(prompt)
+            quiet_since = time.monotonic()
             while True:
                 if should_cancel and should_cancel():
+                    # Tell the engine, or it carries on rendering something
+                    # nobody is waiting for and the next job queues behind it.
                     self.interrupt()
                     raise ComfyError("Stopped.", reason_key="cancelled")
 
                 try:
-                    raw = socket.recv(timeout=WS_MESSAGE_TIMEOUT)
-                except TimeoutError as exc:
+                    raw = socket.recv(timeout=WS_POLL)
+                except TimeoutError:
+                    if time.monotonic() - quiet_since > WS_SILENCE_BUDGET:
+                        self.interrupt()
+                        raise ComfyError(
+                            "ComfyUI stopped reporting progress.",
+                            reason_key="ws_timeout") from None
+                    continue
+                except ConnectionClosed as exc:
                     raise ComfyError(
-                        "ComfyUI stopped reporting progress.",
-                        reason_key="ws_timeout") from exc
+                        "ComfyUI went away while working. If it crashed, its log says why.",
+                        reason_key="engine_gone", detail=str(exc)) from exc
+                quiet_since = time.monotonic()
 
                 if isinstance(raw, bytes):
                     continue          # a live preview image; nothing to do with it
@@ -257,7 +290,19 @@ class ComfyClient:
                     # outputs were all cached can finish on this alone.
                     break
 
-        return outputs_from_history(self.history(prompt_id))
+        return outputs_from_history(self._history_when_ready(prompt_id))
+
+    def _history_when_ready(self, prompt_id: str) -> dict:
+        """The history entry, once the engine has actually written it."""
+        import time
+
+        entry: dict = {}
+        for _ in range(HISTORY_ATTEMPTS):
+            entry = self.history(prompt_id)
+            if entry.get("outputs"):
+                return entry
+            time.sleep(HISTORY_WAIT)
+        return entry
 
     def _ws_url(self) -> str:
         scheme = "wss" if self.base_url.startswith("https") else "ws"
@@ -299,16 +344,28 @@ def outputs_from_history(entry: dict) -> list[Output]:
     """Every file a finished run produced, in node order."""
     found: list[Output] = []
     for node_output in (entry.get("outputs") or {}).values():
+        animated = bool((node_output.get("animated") or [False])[0]) \
+            if isinstance(node_output.get("animated"), (list, tuple)) else False
         for key in OUTPUT_KEYS:
             for item in node_output.get(key) or []:
                 if not isinstance(item, dict) or not item.get("filename"):
                     continue
+                kind = key
+                if key == "gifs" or (key == "images" and animated):
+                    kind = "video"
                 found.append(Output(
                     filename=item["filename"],
                     subfolder=item.get("subfolder", ""),
                     type=item.get("type", "output"),
-                    kind="images" if key == "gifs" else key,
+                    kind=kind,
                 ))
+        # 3D: "result": [model_file, camera_info, ...]; the file is a string.
+        result = node_output.get("result")
+        if isinstance(result, (list, tuple)) and result and isinstance(result[0], str):
+            name = result[0]
+            subfolder, _, filename = name.rpartition("/")
+            found.append(Output(filename=filename or name, subfolder=subfolder,
+                                type="output", kind="3d"))
     return found
 
 

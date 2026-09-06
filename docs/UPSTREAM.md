@@ -41,6 +41,9 @@ Verified 2026-09-05 against ComfyUI v0.34.0 unless stated otherwise.
 | TRELLIS.2 and Pixal3D are native in core with no compiled dependencies | `comfy_extras/nodes_trellis2.py` (PR #14718, merged 2026-08-22) | The entire single-venv, no-build-tools 3D story |
 | Official templates may be **subgraph-based**: top-level node whose `type` is a UUID, real graph under `definitions.subgraphs[0]` with typed `inputs` | `Comfy-Org/workflow_templates` `image_z_image_turbo` | Parameter binding strategy; `derive_catalog.py` handles both shapes |
 | Template `properties.models[]` carries `{name, url, directory}` verbatim | any template JSON | `derive_catalog.py`, i.e. the whole catalogue |
+| `uv python install --no-bin` installs the interpreter without also writing a `python3.x` launcher into `~/.local/bin` | uv 0.12.10 `uv python install --help` | Nothing of ours may land outside the data root; the shim would shadow the user's own Python and survive uninstall |
+| `function UninstallSilent: Boolean;` returns True when the uninstaller runs under `/SILENT` or `/VERYSILENT` | `jrsoftware/issrc` `ISHelp/isxfunc.xml` ("Setup or Uninstall Info") | The post-uninstall message box is skipped when nobody is there to dismiss it |
+| A 416 to a byte-range request carries `Content-Range: bytes */<complete-length>` | RFC 9110 §15.5.17 / §14.4 | How a resumed download tells "already have it all" from "have more than the server does" |
 
 ## Known upstream issues we route around
 

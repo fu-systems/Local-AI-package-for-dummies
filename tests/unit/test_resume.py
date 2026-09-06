@@ -237,7 +237,7 @@ class TestTheWorkspaceStep:
     def _run_step(self, runner, monkeypatch, *, existing_version, venv_exists):
         calls = {}
 
-        def fake_create(uv, runtime, version, *, clear=False, log=None):
+        def fake_create(uv, runtime, version, *, clear=False, log=None, should_cancel=None):
             calls["clear"] = clear
             calls["version"] = version
             class R:
@@ -290,7 +290,7 @@ class TestTheWorkspaceStep:
     def test_the_failure_message_names_the_path_and_the_cause(self, tmp_path, monkeypatch):
         runner = self._runner(tmp_path)
 
-        def fake_create(uv, runtime, version, *, clear=False, log=None):
+        def fake_create(uv, runtime, version, *, clear=False, log=None, should_cancel=None):
             class R:
                 ok = False
                 stdout = "error: Failed to create virtual environment\nno space left"

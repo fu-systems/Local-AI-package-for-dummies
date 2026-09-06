@@ -140,7 +140,7 @@ def build_plan(
         # Immediately after, never later: catching a CPU-only build here costs
         # ninety seconds, catching it after the models costs an hour and 40 GB.
         Step(Kind.VERIFY_TORCH, "Checking your graphics card is really being used",
-             payload={"expect_tag": torch.expected_local_tag}),
+             payload={"expect_tag": torch.expected_local_tag, "env": dict(torch.env)}),
         Step(Kind.FETCH_ENGINE, "Installing the AI engine",
              f"ComfyUI {ENGINE_TAG}",
              payload={"url": ENGINE_URL, "tag": ENGINE_TAG}),

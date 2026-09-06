@@ -22,6 +22,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from toolshed.exec.download import Cancelled
+
 IS_WINDOWS = sys.platform == "win32"
 
 # Keep a console window from flashing up behind a GUI app on Windows.
@@ -72,14 +74,22 @@ def run(
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
     on_line: Callable[[str], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Result:
     """Run a command to completion, streaming its output, with a hard deadline.
 
     ``on_line`` receives each line as it appears, so the user sees a log moving
     rather than a frozen window during a five-minute pip install.
+
+    ``should_cancel`` is polled while the child runs. Stop used to work only
+    between steps and inside downloads; pressed during a twenty-minute pip
+    install it did nothing until the install finished, which is not what a
+    button labelled Stop means. When it returns true the child is killed with
+    its whole tree and ``Cancelled`` is raised, the same signal the downloads
+    use.
     """
     argv = [str(c) for c in cmd]
-    full_env = {**os.environ, **(env or {})}
+    full_env = child_environment(env)
     # Unbuffered, or a streamed log arrives in one lump at the end.
     full_env.setdefault("PYTHONUNBUFFERED", "1")
 
@@ -116,6 +126,10 @@ def run(
         while True:
             if process.poll() is not None:
                 break
+            if should_cancel and should_cancel():
+                terminate_tree(process)
+                reader.join(timeout=5)
+                raise Cancelled()
             if time.monotonic() >= deadline:
                 terminate_tree(process)
                 reader.join(timeout=5)
@@ -129,3 +143,32 @@ def run(
 
     reader.join(timeout=10)
     return Result(process.returncode, "\n".join(lines), "")
+
+
+def child_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a child should inherit from a possibly-frozen app.
+
+    PyInstaller's bootloader points LD_LIBRARY_PATH at the bundle's own
+    ``_internal`` so the frozen app finds its Qt and libstdc++. Every child
+    inherits that, and a child that is *another* Python -- the venv's, running
+    PyTorch -- then loads our bundled libstdc++ and friends instead of its own.
+    That is exactly the "works from source, breaks in the tarball" bug. The
+    bootloader keeps the original in LD_LIBRARY_PATH_ORIG, so it is restored;
+    when there was none, the variable is removed rather than left pointing at
+    us. Same for the other loader variables the install wrapper clears.
+    """
+    env = dict(os.environ)
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+            original = env.pop(f"{var}_ORIG", None)
+            if original:
+                env[var] = original
+            else:
+                env.pop(var, None)
+        for var in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH", "QML2_IMPORT_PATH",
+                    "PYTHONHOME", "PYTHONPATH"):
+            env.pop(var, None)
+    if extra:
+        env.update(extra)
+    return env

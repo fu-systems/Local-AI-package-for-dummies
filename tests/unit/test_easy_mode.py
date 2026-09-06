@@ -223,10 +223,14 @@ class TestReadingWhatCameOut:
             "1": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
             "2": {"audio": [{"filename": "b.mp3", "subfolder": "audio", "type": "output"}]},
             "3": {"video": [{"filename": "c.mp4", "subfolder": "", "type": "output"}]},
-            "4": {"3d": [{"filename": "d.glb", "subfolder": "", "type": "output"}]},
+            # PreviewUI3D: "result" is [model file, camera info, ...]; the
+            # file is a plain string, not an {filename, subfolder} record.
+            "4": {"result": ["3d/d.glb", {"position": [0, 0, 1]}]},
         }}
-        kinds = {o.kind for o in outputs_from_history(history)}
-        assert kinds == {"images", "audio", "video", "3d"}
+        found = outputs_from_history(history)
+        assert {o.kind for o in found} == {"images", "audio", "video", "3d"}
+        model = next(o for o in found if o.kind == "3d")
+        assert (model.filename, model.subfolder) == ("d.glb", "3d")
 
     def test_a_run_that_made_nothing_is_not_an_error(self):
         assert outputs_from_history({"outputs": {}}) == []

@@ -150,6 +150,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.install_page = InstallPage()
             self.install_page.done.connect(self._on_install_done)
             self.install_page.failed.connect(self._on_install_failed)
+            self.install_page.stopped.connect(self._on_install_stopped)
             self.launch_page = LaunchPage(default_data_root())
             self.launch_page.want_more_packs.connect(self._go_choose_packs)
             self.make_page = MakePage(default_data_root())
@@ -287,6 +288,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.back_button.setText("Close")
         self.back_button.setVisible(True)
 
+    def _on_install_stopped(self) -> None:
+        """Stop pressed: offer to carry on, or to leave. Never a dead end."""
+        self._installing = False
+        self._failed = True
+        self.install_page.heading.setText("Stopped")
+        self.install_page.current.setText("Setup was stopped before it finished.")
+        self.install_page.hint.setText(
+            "Nothing you have already downloaded is lost. Trying again picks up "
+            "where this left off.")
+        self.install_page.hint.setVisible(True)
+        self.next_button.setText("Try again")
+        self.back_button.setText("Close")
+        self.back_button.setVisible(True)
+
     def _retry_install(self) -> None:
         self._failed = False
         self.install_page.hint.setVisible(False)
@@ -332,6 +347,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         if self.make_page:
             self.make_page.shutdown()
+        if self.install_page:
+            # Same rule for the installer: a worker outliving the window
+            # aborts the process, and an abort mid-download is the one way to
+            # lose the .part the cancel path takes care to keep.
+            self.install_page.shutdown()
         if self.launch_page and self.launch_page.is_running:
             self.launch_page.stop_engine()
         super().closeEvent(event)

@@ -79,7 +79,11 @@ class InputSpec:
 
     @property
     def choices(self) -> tuple[str, ...]:
-        return tuple(str(c) for c in self.type) if isinstance(self.type, list) else ()
+        if isinstance(self.type, list):
+            return tuple(str(c) for c in self.type)
+        if self.type == "COMBO":
+            return tuple(str(c) for c in (self.options.get("options") or ()))
+        return ()
 
     @property
     def kind(self) -> str:
@@ -117,8 +121,12 @@ class NodeSpec:
 
 def _is_widget(type_: Any) -> bool:
     if isinstance(type_, list):
-        return True                      # a combo: a list of choices
-    return type_ in SCALAR_WIDGET_TYPES
+        return True                      # a V1 combo: a list of choices
+    # A V3 node (comfy_api.latest, io.Combo) reports the string "COMBO" and puts
+    # its choices under options["options"]. TRELLIS.2, the mesh nodes and
+    # SaveVideo are all V3, so treating this as a wired input dropped every one
+    # of their dropdown values and broke the 3D and video graphs outright.
+    return type_ == "COMBO" or type_ in SCALAR_WIDGET_TYPES
 
 
 def specs_from_object_info(doc: dict) -> dict[str, NodeSpec]:
@@ -346,7 +354,11 @@ def to_api(workflow: dict, specs: dict[str, NodeSpec]) -> dict[str, dict]:
 
     # Stable, simple ids. The uids carry colons from subgraph nesting and there
     # is no reason to make the engine's error messages harder to read.
-    numbering = {uid: str(i + 1) for i, uid in enumerate(flat.placed)}
+    # Only nodes the engine knows get a number. A frontend-only node such as
+    # the editor's PrimitiveNode is dropped below, so a link from it must not
+    # resolve to an id the engine will never see.
+    numbering = {uid: str(i + 1) for i, uid in enumerate(flat.placed)
+                 if placed_spec(specs, flat.placed[uid]) is not None}
 
     prompt: dict[str, dict] = {}
     for uid, placed in flat.placed.items():
@@ -364,9 +376,12 @@ def to_api(workflow: dict, specs: dict[str, NodeSpec]) -> dict[str, dict]:
             if isinstance(resolved, Ref):
                 target = numbering.get(resolved.uid)
                 if target is None:
-                    # Points at something dropped; leave the input unset and
-                    # let the engine say so, rather than sending a dangling id.
-                    inputs.pop(name, None)
+                    # The source is a node the engine does not have -- the
+                    # editor's PrimitiveNode feeding a widget, typically. The
+                    # editor writes that value into the target's own widget on
+                    # save, so the right thing is to keep the widget value
+                    # already in `inputs`, not to delete it. Deleting it turned
+                    # "Make music" into required_input_missing on first press.
                     continue
                 inputs[name] = [target, resolved.slot]
             elif resolved is not None:
@@ -381,6 +396,10 @@ def to_api(workflow: dict, specs: dict[str, NodeSpec]) -> dict[str, dict]:
     if not prompt:
         raise ConversionError("the workflow has no nodes the engine can run")
     return prompt
+
+
+def placed_spec(specs: dict[str, NodeSpec], placed: _Placed) -> NodeSpec | None:
+    return specs.get(placed.node.get("type"))
 
 
 def _widget_inputs(node: dict, spec: NodeSpec) -> dict[str, Any]:

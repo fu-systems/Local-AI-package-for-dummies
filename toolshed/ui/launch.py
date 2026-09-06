@@ -144,9 +144,9 @@ class LaunchPage(QtWidgets.QWidget):
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.log_path)
 
+        # Not checkable: a checkable box looked like a switch, but the
+        # options were applied regardless of it. What is typed here is used.
         self.flags_box = QtWidgets.QGroupBox("Extra ComfyUI options")
-        self.flags_box.setCheckable(True)
-        self.flags_box.setChecked(False)
         flags_layout = QtWidgets.QVBoxLayout(self.flags_box)
         self.flags = QtWidgets.QLineEdit(" ".join(read_extra_flags(self.root)))
         self.flags.setPlaceholderText("--fp32-vae")
@@ -206,7 +206,14 @@ class LaunchPage(QtWidgets.QWidget):
 
         typed = self.flags.text().strip()
         write_extra_flags(self.root, typed)
-        self.engine = Engine(root=self.root, env=env or {},
+        if env is None:
+            # The environment the installer chose for PyTorch -- the AMD
+            # HSA_OVERRIDE_GFX_VERSION for cards that need it -- must reach the
+            # engine too, or the card the install proved usable is not used.
+            from toolshed.exec.manifest import Manifest
+
+            env = dict(Manifest.load(self.root).torch_env)
+        self.engine = Engine(root=self.root, env=env,
                              extra_args=read_extra_flags(self.root))
         self.worker = EngineWorker(self.engine)
         self.worker.line.connect(self.log.appendPlainText)

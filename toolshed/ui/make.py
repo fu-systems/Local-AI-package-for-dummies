@@ -286,7 +286,12 @@ class GenerateWorker(QtCore.QThread):
                 titles=knobs_module.titles(graph),
             )
         except ComfyError as exc:
-            if exc.reason_key != "cancelled":
+            # A stop is reported too, or the screen stays on "Stopping…"
+            # with the button greyed out, waiting for a result that is never
+            # coming.
+            if exc.reason_key == "cancelled":
+                self.failed.emit("Stopped.", "")
+            else:
                 self.failed.emit(str(exc), exc.detail)
         except ConversionError as exc:
             self.failed.emit(f"This workflow cannot be run from here: {exc}", "")
@@ -488,6 +493,11 @@ class MakePage(QtWidgets.QWidget):
         self.go.setText(recipe.verb)
         self.prompt.setPlaceholderText(
             PLACEHOLDER.get(recipe.pack_id) or "Describe what you want…")
+        # Back to "as the workflow has it", so this workflow's own size fills
+        # the boxes in. Left alone, a picture workflow's 1024x1024 would carry
+        # over to a video one and be sent as an override it never asked for.
+        self.width.setValue(0)
+        self.height.setValue(0)
         self.inspect()
         self._sync()
 

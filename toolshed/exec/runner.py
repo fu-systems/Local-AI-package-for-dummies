@@ -125,7 +125,11 @@ class Runner:
         # and torch_index describe what actually landed, so they are written by
         # the steps that land them -- not here, where they would be a claim
         # made before the fact and left behind by a failure.
-        self.manifest.packs = [p.id for p in self.plan.packs]
+        #
+        # Added to, never replaced: a second run that adds one pack must not
+        # make the manifest forget the ones already installed, or the launcher
+        # stops offering them.
+        self.manifest.packs = sorted(set(self.manifest.packs) | {p.id for p in self.plan.packs})
 
         for step in self.plan.steps:
             self._check_cancelled()
@@ -170,11 +174,12 @@ class Runner:
     # -- steps --------------------------------------------------------------
 
     def _ensure_uv(self, step: Step) -> None:
-        uvtool.ensure_uv(self.runtime, log=self._log)
+        uvtool.ensure_uv(self.runtime, log=self._log, should_cancel=self.should_cancel)
 
     def _ensure_python(self, step: Step) -> None:
         uv = uvtool.uv_path(self.runtime)
-        result = uvtool.install_python(uv, self.runtime, step.payload["version"], log=self._log)
+        result = uvtool.install_python(uv, self.runtime, step.payload["version"], log=self._log,
+                                       should_cancel=self.should_cancel)
         if not result.ok:
             raise InstallFailed(f"Could not set up Python: {result.stderr or 'see the log'}",
                                 step=step)
@@ -211,7 +216,8 @@ class Runner:
 
         uv = uvtool.uv_path(self.runtime)
         result = uvtool.create_venv(uv, self.runtime, PYTHON_VERSION,
-                                    clear=venv.exists(), log=self._log)
+                                    clear=venv.exists(), log=self._log,
+                                    should_cancel=self.should_cancel)
         if not result.ok:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
             hint = detail[-1] if detail else "see the log"
@@ -225,14 +231,19 @@ class Runner:
         uv = uvtool.uv_path(self.runtime)
         result = uvtool.pip_install(
             uv, self.runtime, ["torch", "torchvision", "torchaudio"],
-            index_url=index, log=self._log, timeout=3600)
+            index_url=index, log=self._log, timeout=3600, should_cancel=self.should_cancel)
         if not result.ok:
             raise InstallFailed("Could not install the graphics card software.", step=step)
         self.manifest.torch_index = index
+        # Recorded so the launcher starts the engine with the same environment
+        # the card was verified under. Without it an AMD card that needs the
+        # HSA override passes the check here and vanishes at run time.
+        self.manifest.torch_env = dict(step.payload.get("env") or {})
 
     def _verify_torch(self, step: Step) -> None:
+        env = dict(step.payload.get("env") or self.manifest.torch_env or {})
         check = uvtool.verify_torch(self.runtime, step.payload.get("expect_tag", ""),
-                                    log=self._log)
+                                    env=env, log=self._log, should_cancel=self.should_cancel)
         if not check.ok:
             raise InstallFailed(check.message, step=step, reason_key="torch_unusable")
         if check.warning:
@@ -282,7 +293,8 @@ class Runner:
         # Against PyPI, not the torch index: the previous step replaced the
         # index entirely, and these are ordinary packages.
         result = uvtool.pip_install(uv, self.runtime, ["-r", str(reqs)],
-                                    log=self._log, timeout=2400)
+                                    log=self._log, timeout=2400,
+                                    should_cancel=self.should_cancel)
         if not result.ok:
             raise InstallFailed("Could not install the engine's dependencies.", step=step)
 
@@ -294,13 +306,16 @@ class Runner:
                     "state/downloads", "state/logs"):
             (self.root / rel).mkdir(parents=True, exist_ok=True)
 
-    def _already_have(self, target, item) -> bool:
-        """Is this file already here, complete and unchanged since we fetched it?
+    def _already_have(self, target, item) -> str | None:
+        """The file's sha256 if it is already here, complete and unchanged since
+        we fetched it; None if it has to be downloaded.
 
         Only ``download_file`` can answer that from the catalogue, and only once
         the catalogue's hashes are frozen; until then every hash is
-        PENDING_FREEZE and it has nothing to compare against. So the manifest
-        answers instead: it recorded what the file hashed to when it landed.
+        PENDING_FREEZE and it has nothing to compare against. So our own record
+        answers instead: what the file hashed to when it landed, from the
+        manifest or -- after an uninstall that kept the models and removed the
+        manifest -- from the sidecar kept beside the models.
 
         Checked rather than assumed. Re-hashing 40 GB takes under a minute and
         catches a truncated or edited file; trusting the record instead would
@@ -308,18 +323,18 @@ class Runner:
         first because that rules most stale files out without reading them.
         """
         if item.hash_is_frozen:
-            return False        # download_file does this check itself, better.
+            return None         # download_file does this check itself, better.
         if not target.is_file():
-            return False
+            return None
         try:
             key = str(target.relative_to(self.root))
         except ValueError:
-            return False        # outside the data root; the manifest cannot speak for it
-        prior = next((e for e in self.manifest.files if e.path == key), None)
-        if prior is None or not prior.sha256 or prior.size_bytes != target.stat().st_size:
-            return False
+            return None         # outside the data root; the manifest cannot speak for it
+        prior = self.manifest.prior_hash(key)
+        if prior is None or prior[1] != target.stat().st_size:
+            return None
         self._log(f"Checking {item.filename} is still intact…")
-        return file_digest(target) == prior.sha256
+        return prior[0] if file_digest(target) == prior[0] else None
 
     def _download(self, step: Step) -> None:
         pack_id = step.payload.get("id", "")
@@ -331,9 +346,12 @@ class Runner:
             # A re-run must not fetch tens of gigabytes it already has. This is
             # what makes "just start it again" a reasonable thing to tell
             # someone whose install died two hours in.
-            if self._already_have(target, item):
+            if kept := self._already_have(target, item):
                 done_bytes += target.stat().st_size
                 self._log(f"{item.filename} is already here; skipping.")
+                # Written down again: after an uninstall the manifest is
+                # gone, and this run's record must cover the kept files too.
+                self._remember(target, item, kept, pack_id)
                 continue
 
             size = item.size_bytes or remote_size(item.url, token=self.hf_token)
@@ -353,10 +371,24 @@ class Runner:
                 size_bytes=item.size_bytes, token=self.hf_token, attempts=self.attempts,
                 on_progress=progress, should_cancel=self.should_cancel)
             done_bytes += target.stat().st_size
-            self.manifest.record(Entry(
-                path=str(target.relative_to(self.root)), sha256=digest,
-                size_bytes=target.stat().st_size, source=item.url, pack=pack_id,
-                hash_verified_against="release" if item.hash_is_frozen else "publisher"))
+            self._remember(target, item, digest, pack_id)
+
+    def _remember(self, target, item, digest: str, pack_id: str) -> None:
+        """Record a landed file, and write the record out *now*.
+
+        The manifest used to be saved only when the whole pack step finished.
+        A pack is several files and many gigabytes; an install that died on
+        the third file had two complete, verified models on disk and no record
+        of either, so the next run hashed nothing, trusted nothing, and fetched
+        them again. Each file is written down the moment it lands.
+        """
+        entry = Entry(
+            path=str(target.relative_to(self.root)), sha256=digest,
+            size_bytes=target.stat().st_size, source=item.url, pack=pack_id,
+            hash_verified_against="release" if item.hash_is_frozen else "publisher")
+        self.manifest.record(entry)
+        self.manifest.remember_hash(entry)
+        self.manifest.save()
 
     def _inject(self, step: Step) -> None:
         inject.inject([step.payload["id"]], self.comfy)

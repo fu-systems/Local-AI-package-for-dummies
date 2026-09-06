@@ -175,6 +175,21 @@ def _text_source(prompt: dict[str, dict], start: str, seen: frozenset[str]) -> T
     return None
 
 
+def _feeds(prompt: dict[str, dict], source: str, sink: str, input_name: str,
+           _depth: int = 0) -> bool:
+    """Does ``source`` reach ``sink``'s named input, following links upstream?"""
+    if _depth > 32:
+        return False
+    upstream = _ref(prompt.get(sink, {}).get("inputs", {}).get(input_name))
+    if upstream is None:
+        return False
+    if upstream == source:
+        return True
+    return any(_feeds(prompt, source, upstream, name, _depth + 1)
+               for name, value in prompt.get(upstream, {}).get("inputs", {}).items()
+               if _ref(value) is not None)
+
+
 def analyse(prompt: dict[str, dict], specs: dict | None = None) -> Knobs:
     """Work out what can be driven in an already-converted graph.
 
@@ -186,6 +201,7 @@ def analyse(prompt: dict[str, dict], specs: dict | None = None) -> Knobs:
     dropdown, only the engine can say.
     """
     knobs = Knobs()
+    size_candidates: list[str] = []
 
     for node_id, node in prompt.items():
         inputs = node.get("inputs", {})
@@ -198,8 +214,7 @@ def analyse(prompt: dict[str, dict], specs: dict | None = None) -> Knobs:
             knobs.seeds.append(Target(node_id, "noise_seed", inputs["noise_seed"]))
 
         if isinstance(inputs.get("width"), int) and isinstance(inputs.get("height"), int):
-            knobs.width.append(Target(node_id, "width", inputs["width"]))
-            knobs.height.append(Target(node_id, "height", inputs["height"]))
+            size_candidates.append(node_id)
 
         if isinstance(inputs.get("steps"), int):
             knobs.steps.append(Target(node_id, "steps", inputs["steps"]))
@@ -226,6 +241,20 @@ def analyse(prompt: dict[str, dict], specs: dict | None = None) -> Knobs:
             found = _text_source(prompt, upstream, frozenset())
             if found is not None and found not in bucket:
                 bucket.append(found)
+
+    # "The size" is the latent a sampler starts from, not every node that
+    # happens to have a width and a height. The 3D template has several --
+    # texture bake resolution, atlas size -- and rewriting all of them from one
+    # pair of boxes would quietly change things nobody meant to touch. Prefer
+    # nodes upstream of a sampler's latent_image; only fall back to all of them
+    # when there is no sampler to anchor to.
+    anchored = [n for n in size_candidates
+                if any(_feeds(prompt, n, sampler, "latent_image") for sampler in prompt
+                       if "latent_image" in prompt[sampler].get("inputs", {}))]
+    for node_id in (anchored or size_candidates):
+        inputs = prompt[node_id].get("inputs", {})
+        knobs.width.append(Target(node_id, "width", inputs["width"]))
+        knobs.height.append(Target(node_id, "height", inputs["height"]))
 
     # A node reached through both branches -- one encoder feeding positive and
     # negative alike -- must not be rewritten by the negative box, or typing a
