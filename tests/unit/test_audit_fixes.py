@@ -627,3 +627,74 @@ def _pack_ids() -> list[str]:
 
 
 ALL_PACK_IDS = _pack_ids()
+
+
+# ---------------------------------------------------------------------------
+# uv's silence while it downloads PyTorch
+
+
+class TestASilentDownloadIsNotMistakenForAHang:
+    """The install sat on "Using Python 3.12.14 environment at: …" for minutes
+    while uv fetched several gigabytes of PyTorch in silence. Two faults: the
+    screen gave no sign anything was happening, and a fixed 60-minute budget
+    would have killed a slow connection's download at the finish line."""
+
+    def test_output_resets_the_deadline(self):
+        """A child that keeps talking is alive, however long it takes."""
+        script = "import sys,time\nfor i in range(6):\n    print(i, flush=True); time.sleep(0.3)"
+        result = run([sys.executable, "-c", script], timeout=1.0)
+        assert result.ok, result.stderr
+
+    def test_a_heartbeat_reporting_progress_resets_it_too(self):
+        result = run([sys.executable, "-c", "import time; time.sleep(1.8)"],
+                     timeout=0.7, heartbeat=lambda: True, heartbeat_every=0.2)
+        assert result.ok, result.stderr
+
+    def test_no_output_and_no_progress_is_a_stall(self):
+        result = run([sys.executable, "-c", "import time; time.sleep(30)"],
+                     timeout=0.7, heartbeat=lambda: False, heartbeat_every=0.2)
+        assert not result.ok
+        assert "no sign of progress" in result.stderr
+
+    def test_pip_install_forwards_the_heartbeat(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(uvtool, "run",
+                            lambda cmd, **kw: (seen.update(kw), _ok_result())[1])
+        beat = lambda: True  # noqa: E731
+        uvtool.pip_install(Path("uv"), tmp_path, ["torch"], heartbeat=beat)
+        assert seen["heartbeat"] is beat
+
+    def test_the_cache_growing_is_reported_as_bytes_received(self, tmp_path, monkeypatch):
+        """What the user sees under the step while uv says nothing."""
+        plan = build_plan(AMD_NEEDS_OVERRIDE, [], tmp_path)
+        install = next(s for s in plan.steps if s.kind == Kind.INSTALL_TORCH)
+        runner = Runner(InstallPlan((install,), plan.torch, tmp_path, ()))
+        events = []
+        runner.on_event = events.append
+        cache = tmp_path / "runtime" / "uv-cache" / "archive-v0" / "abc"
+        cache.mkdir(parents=True)
+
+        def fake_pip(uv, runtime, packages, *, heartbeat=None, **kw):
+            assert heartbeat is not None, "torch is installed with nothing watching the download"
+            assert heartbeat() is False, "nothing has arrived yet"
+            (cache / "torch.so").write_bytes(b"x" * 5_000_000)
+            assert heartbeat() is True, "5 MB arrived and was not noticed"
+            return _ok_result()
+
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "pip_install", fake_pip)
+        runner._install_torch(install)
+
+        said = [e.message for e in events if e.kind == "progress"]
+        assert said and "0.01 GB received so far" in said[-1] and "MB/s" in said[-1]
+
+    def test_a_failed_uv_run_says_what_uv_said(self, tmp_path, monkeypatch):
+        plan = build_plan(AMD_NEEDS_OVERRIDE, [], tmp_path)
+        install = next(s for s in plan.steps if s.kind == Kind.INSTALL_TORCH)
+        runner = Runner(InstallPlan((install,), plan.torch, tmp_path, ()))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "pip_install",
+                            lambda *a, **kw: proc.Result(-1, "", "uv showed no sign of progress"))
+        with pytest.raises(InstallFailed) as exc:
+            runner._install_torch(install)
+        assert "no sign of progress" in str(exc.value)

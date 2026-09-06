@@ -12,6 +12,7 @@ end up reporting that a program is missing when it is plainly installed.
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 import tarfile
@@ -173,8 +174,15 @@ def pip_install(
     log: LogFn | None = None,
     timeout: float = 1800,
     should_cancel: CancelFn | None = None,
+    heartbeat: Callable[[], bool] | None = None,
 ) -> Result:
     """Install into our venv.
+
+    ``heartbeat`` is polled while uv runs, because uv is silent while it
+    downloads: progress bars are suppressed (UV_NO_PROGRESS, and it would not
+    draw them into a pipe anyway) and its summary lines come only at phase
+    boundaries. The PyTorch ROCm build is gigabytes, so without something else
+    to watch the screen sits on one line for many minutes and looks hung.
 
     ``--index-url``, never ``--extra-index-url``: with an extra index the
     resolver may legitimately prefer the PyPI wheel, and torch's Windows PyPI
@@ -186,7 +194,29 @@ def pip_install(
         cmd += ["--index-url", index_url]
     cmd += packages
     return run(cmd, env=uv_env(runtime_dir), timeout=timeout, on_line=log,
-               should_cancel=should_cancel)
+               should_cancel=should_cancel, heartbeat=heartbeat)
+
+
+def cache_bytes(runtime_dir: Path) -> int:
+    """How much uv has put in its cache so far. It unzips wheels as they
+    arrive, so this grows while a download is in flight."""
+    total = 0
+    stack = [runtime_dir / "uv-cache"]
+    while stack:
+        folder = stack.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
 
 
 # Reports the name of device 0 as well as the count, because the count alone
