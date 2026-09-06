@@ -41,6 +41,8 @@ from toolshed.exec.engine import (
     Layout,
     choose_port,
     port_is_free,
+    read_extra_flags,
+    write_extra_flags,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -327,3 +329,50 @@ def test_the_stand_in_engine_is_a_fair_test(installed):
         capture_output=True, text=True, timeout=30, env={"FAKE_MODE": "die"},
     )
     assert "Total VRAM" in result.stdout
+
+
+class TestExtraFlags:
+    """A lever for the failures Toolshed cannot fix from outside the engine.
+
+    ComfyUI has real options for these -- --fp32-vae and --cpu-vae for a model
+    the card will not run, --cuda-device to choose between two graphics cards,
+    --reserve-vram to leave the desktop some room. Without somewhere to put
+    them, someone hitting one of those has no move except to stop using the app.
+    """
+
+    def test_none_by_default(self, tmp_path):
+        assert read_extra_flags(tmp_path) == []
+
+    def test_they_reach_the_command_line(self, tmp_path):
+        engine = Engine(root=tmp_path, port=1, extra_args=["--fp32-vae"])
+        assert engine.command()[-1] == "--fp32-vae"
+
+    def test_they_come_last_so_they_can_override_ours(self, tmp_path):
+        """argparse takes the later value for a repeated option. That is what
+        makes this an escape hatch rather than a suggestion box."""
+        engine = Engine(root=tmp_path, port=1, extra_args=["--port", "9999"])
+        cmd = engine.command()
+        assert cmd[-2:] == ["--port", "9999"]
+        assert cmd.index("--port") < len(cmd) - 2, "ours should still be there, earlier"
+
+    def test_they_survive_a_restart(self, tmp_path):
+        write_extra_flags(tmp_path, "--cuda-device 1  --reserve-vram 2")
+        assert read_extra_flags(tmp_path) == ["--cuda-device", "1", "--reserve-vram", "2"]
+
+    def test_quoting_is_respected(self, tmp_path):
+        write_extra_flags(tmp_path, '--output-directory "/two words/out"')
+        assert read_extra_flags(tmp_path) == ["--output-directory", "/two words/out"]
+
+    def test_nonsense_does_not_stop_the_engine_starting(self, tmp_path):
+        """An unclosed quote must not turn into a crash on launch."""
+        write_extra_flags(tmp_path, 'a "b')
+        assert read_extra_flags(tmp_path) == []
+
+    def test_they_are_argv_never_a_shell(self, tmp_path):
+        """Nothing here is interpolated into a command line, so there is
+        nothing to inject into."""
+        engine = Engine(root=tmp_path, port=1, extra_args=["; rm -rf /"])
+        assert "; rm -rf /" in engine.command()
+        source = (Path(__file__).resolve().parents[2]
+                  / "toolshed" / "exec" / "engine.py").read_text()
+        assert "shell=True" not in source

@@ -148,6 +148,7 @@ class Engine:
     root: Path
     env: dict[str, str] = field(default_factory=dict)
     port: int = 0
+    extra_args: list[str] = field(default_factory=list)
     process: subprocess.Popen | None = None
     _log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINES_KEPT))
     _reader: threading.Thread | None = None
@@ -182,6 +183,10 @@ class Engine:
             "--port", str(self.port),
             "--disable-auto-launch",
             "--log-stdout",
+            # Whatever the user added. Last, so it can override anything above
+            # -- argparse takes the later value for a repeated option, which is
+            # what makes this an escape hatch rather than a suggestion box.
+            *self.extra_args,
         ]
 
     # -- lifecycle ----------------------------------------------------------
@@ -315,6 +320,39 @@ class Engine:
     def tail(self, lines: int = 25) -> str:
         """The last of the engine's output, for showing when it goes wrong."""
         return "\n".join(list(self._log)[-lines:])
+
+
+def flags_file(root: Path) -> Path:
+    return root / "state" / "engine-flags.txt"
+
+
+def read_extra_flags(root: Path) -> list[str]:
+    """Extra engine options the user has set, if any.
+
+    ComfyUI has real levers for the failures we cannot fix from out here --
+    --fp32-vae and --cpu-vae for a VAE the card will not run, --cuda-device to
+    pick between two graphics cards, --reserve-vram to leave the desktop some
+    room. Without somewhere to put them, someone hitting one of those has no
+    move at all except to stop using the app.
+
+    Parsed with shlex so quoting behaves, and passed as argv to a process we
+    spawn without a shell, so there is nothing here to inject into.
+    """
+    import shlex
+
+    path = flags_file(root)
+    if not path.is_file():
+        return []
+    try:
+        return shlex.split(path.read_text(encoding="utf-8"), comments=True)
+    except (OSError, ValueError):
+        return []
+
+
+def write_extra_flags(root: Path, text: str) -> None:
+    path = flags_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.strip() + "\n", encoding="utf-8")
 
 
 def open_in_browser(url: str) -> bool:
