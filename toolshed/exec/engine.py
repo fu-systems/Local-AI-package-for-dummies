@@ -148,9 +148,11 @@ class Engine:
     root: Path
     env: dict[str, str] = field(default_factory=dict)
     port: int = 0
+    extra_args: list[str] = field(default_factory=list)
     process: subprocess.Popen | None = None
     _log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINES_KEPT))
     _reader: threading.Thread | None = None
+    _stopping: bool = False
 
     @property
     def layout(self) -> Layout:
@@ -182,11 +184,24 @@ class Engine:
             "--port", str(self.port),
             "--disable-auto-launch",
             "--log-stdout",
+            # Whatever the user added. Last, so it can override anything above
+            # -- argparse takes the later value for a repeated option, which is
+            # what makes this an escape hatch rather than a suggestion box.
+            *self.extra_args,
         ]
 
     # -- lifecycle ----------------------------------------------------------
 
-    def start(self, *, on_line: LogFn | None = None) -> None:
+    def start(self, *, on_line: LogFn | None = None,
+              on_died: Callable[[str], None] | None = None) -> None:
+        """Launch the engine.
+
+        ``on_died`` is called if it exits without being asked to. That is not a
+        rare case to be tidy about: a GPU driver fault takes the whole process
+        down mid-generation with SIGABRT, and without this the app goes on
+        saying "ComfyUI is running" over a program that is gone, while whatever
+        was waiting on it waits for a reply that will never come.
+        """
         missing = self.layout.missing_pieces()
         if missing:
             raise EngineError(
@@ -227,10 +242,13 @@ class Engine:
             bufsize=1,
             **popen_kwargs(new_group=True),
         )
-        self._reader = threading.Thread(target=self._drain, args=(on_line,), daemon=True)
+        self._stopping = False
+        self._reader = threading.Thread(target=self._drain, args=(on_line, on_died),
+                                        daemon=True)
         self._reader.start()
 
-    def _drain(self, on_line: LogFn | None) -> None:
+    def _drain(self, on_line: LogFn | None,
+               on_died: Callable[[str], None] | None = None) -> None:
         """Copy the engine's output to a file and a ring buffer.
 
         On its own thread: reading the pipe from the caller would block the
@@ -251,6 +269,31 @@ class Engine:
         except (OSError, ValueError):
             # The pipe closing under us is how a stopped engine ends. Not news.
             pass
+
+        # The loop above ends when the engine's output does, which means it has
+        # exited. Reporting that is the whole point of watching.
+        if on_died and not self._stopping and self.process is not None:
+            code = self.process.poll()
+            if code is not None and code != 0:
+                on_died(self._explain_exit(code))
+
+    def _explain_exit(self, code: int) -> str:
+        """Say what happened, in words, for the codes that mean something.
+
+        A GPU page fault -- "Memory access fault by GPU node-1" on ROCm -- kills
+        the process with SIGABRT, which arrives here as -6. It is not something
+        the user did, and it is not out of memory, so it should not be reported
+        as either.
+        """
+        if code == -6:
+            return ("ComfyUI was stopped by the graphics driver. This is usually a "
+                    "driver-level fault rather than anything you did.")
+        if code == -9:
+            return ("ComfyUI was killed, most likely by the system running out of "
+                    "memory. Closing other programs may help.")
+        if code < 0:
+            return f"ComfyUI was stopped by signal {-code}."
+        return f"ComfyUI stopped unexpectedly (exit code {code})."
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -302,6 +345,7 @@ class Engine:
         """Stop the engine and everything it started. Safe to call twice."""
         if self.process is None:
             return
+        self._stopping = True
         if self.process.poll() is None:
             terminate_tree(self.process)
             try:
@@ -315,6 +359,39 @@ class Engine:
     def tail(self, lines: int = 25) -> str:
         """The last of the engine's output, for showing when it goes wrong."""
         return "\n".join(list(self._log)[-lines:])
+
+
+def flags_file(root: Path) -> Path:
+    return root / "state" / "engine-flags.txt"
+
+
+def read_extra_flags(root: Path) -> list[str]:
+    """Extra engine options the user has set, if any.
+
+    ComfyUI has real levers for the failures we cannot fix from out here --
+    --fp32-vae and --cpu-vae for a VAE the card will not run, --cuda-device to
+    pick between two graphics cards, --reserve-vram to leave the desktop some
+    room. Without somewhere to put them, someone hitting one of those has no
+    move at all except to stop using the app.
+
+    Parsed with shlex so quoting behaves, and passed as argv to a process we
+    spawn without a shell, so there is nothing here to inject into.
+    """
+    import shlex
+
+    path = flags_file(root)
+    if not path.is_file():
+        return []
+    try:
+        return shlex.split(path.read_text(encoding="utf-8"), comments=True)
+    except (OSError, ValueError):
+        return []
+
+
+def write_extra_flags(root: Path, text: str) -> None:
+    path = flags_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.strip() + "\n", encoding="utf-8")
 
 
 def open_in_browser(url: str) -> bool:

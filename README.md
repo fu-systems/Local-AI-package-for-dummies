@@ -78,6 +78,29 @@ driver-coupled and must come from your distribution:
 `install.sh` checks for these and tells you what is missing. Ubuntu 22.04 is the
 oldest supported release.
 
+## Removing it
+
+**Linux**
+
+```
+toolshed-uninstall
+```
+
+**Windows** — through Settings, Apps, or the Start menu entry, as usual.
+
+Either one removes everything Toolshed put on the machine **except your
+models**, which are large and slow to fetch again: the app, the launcher, the
+desktop entry, the private Python workspace, the ComfyUI engine and its
+database, the workflows it added, the manifest, logs, part-finished downloads
+and anything you generated.
+
+What survives is `models/` inside the data folder — the folders and the model
+files in them, untouched. Delete that folder yourself if you want the space
+back.
+
+Nothing is left behind on purpose, so reinstalling starts from a clean slate
+rather than on top of whatever the last attempt left.
+
 ## How it relates to ComfyUI
 
 Toolshed downloads [ComfyUI](https://github.com/comfyanonymous/ComfyUI) from

@@ -40,8 +40,11 @@ say "Installing Toolshed to ${APP_DIR}"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 cp -a "$SRC/." "$APP_DIR/"
-rm -f "$APP_DIR/install.sh" "$APP_DIR/uninstall.sh"
-chmod +x "$APP_DIR/toolshed"
+# Keep uninstall.sh. Removing it left no uninstaller anywhere on the machine
+# once the tarball was gone, which made "uninstall" mean "delete some folders
+# and hope", and is how half-removed installs got reinstalled on top of.
+rm -f "$APP_DIR/install.sh"
+chmod +x "$APP_DIR/toolshed" "$APP_DIR/uninstall.sh"
 
 # A WRAPPER, not a symlink, and this matters.
 #
@@ -59,12 +62,20 @@ exec "$HOME/.local/share/toolshed/app/toolshed" "$@"
 LAUNCHER
 chmod +x "$BIN_DIR/toolshed"
 
+# So removing it is a command you can find, not a file you have to still have.
+cat > "$BIN_DIR/toolshed-uninstall" <<'UNINSTALLER'
+#!/bin/sh
+exec "$HOME/.local/share/toolshed/app/uninstall.sh" "$@"
+UNINSTALLER
+chmod +x "$BIN_DIR/toolshed-uninstall"
+
 cp "$APP_DIR/toolshed.png" "$ICON_DIR/toolshed.png" 2>/dev/null || true
 cp "$APP_DIR/toolshed.desktop" "$DESKTOP_DIR/toolshed.desktop" 2>/dev/null || true
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 
 say ""
 say "Done. Launch it from your applications menu, or run: toolshed"
+say "To remove it later:  toolshed-uninstall"
 case ":${PATH}:" in
     *":${BIN_DIR}:"*) ;;
     *) say ""

@@ -20,7 +20,14 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from toolshed.exec.engine import Engine, EngineError, Layout, open_in_browser
+from toolshed.exec.engine import (
+    Engine,
+    EngineError,
+    Layout,
+    open_in_browser,
+    read_extra_flags,
+    write_extra_flags,
+)
 
 
 class EngineWorker(QtCore.QThread):
@@ -29,6 +36,7 @@ class EngineWorker(QtCore.QThread):
     line = QtCore.Signal(str)
     ready = QtCore.Signal(str)               # url
     failed = QtCore.Signal(str, str)         # message, detail
+    died = QtCore.Signal(str)                # it exited without being asked to
 
     def __init__(self, engine: Engine) -> None:
         super().__init__()
@@ -40,7 +48,7 @@ class EngineWorker(QtCore.QThread):
 
     def run(self) -> None:      # noqa: D102 -- QThread entry point
         try:
-            self.engine.start(on_line=self.line.emit)
+            self.engine.start(on_line=self.line.emit, on_died=self.died.emit)
             self.engine.wait_until_ready(should_cancel=lambda: self._stop)
         except EngineError as exc:
             if exc.reason_key != "cancelled":
@@ -127,6 +135,32 @@ class LaunchPage(QtWidgets.QWidget):
         row.addStretch(1)
         layout.addLayout(row)
 
+        # When something fails inside ComfyUI the traceback is in its log, not
+        # in this window. Saying where turns "it broke" into a bug report.
+        self.log_path = QtWidgets.QLabel(
+            f"ComfyUI writes its own log to {Layout(self.root).log_file}")
+        self.log_path.setWordWrap(True)
+        self.log_path.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.log_path)
+
+        self.flags_box = QtWidgets.QGroupBox("Extra ComfyUI options")
+        self.flags_box.setCheckable(True)
+        self.flags_box.setChecked(False)
+        flags_layout = QtWidgets.QVBoxLayout(self.flags_box)
+        self.flags = QtWidgets.QLineEdit(" ".join(read_extra_flags(self.root)))
+        self.flags.setPlaceholderText("--fp32-vae")
+        flags_layout.addWidget(QtWidgets.QLabel(
+            "Passed to ComfyUI when it starts.\n"
+            "If it crashes part-way through, try --disable-async-offload, then "
+            "--disable-pinned-memory. Both are on by default on AMD and both move "
+            "weights by direct memory access, which is what a graphics driver "
+            "fault usually points at.\n"
+            "Others: --fp32-vae or --cpu-vae if a model will not run on your card, "
+            "--reserve-vram 2 to leave room for your desktop."))
+        flags_layout.addWidget(self.flags)
+        layout.addWidget(self.flags_box)
+
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
@@ -170,11 +204,15 @@ class LaunchPage(QtWidgets.QWidget):
             open_in_browser(self.engine.url)
             return
 
-        self.engine = Engine(root=self.root, env=env or {})
+        typed = self.flags.text().strip()
+        write_extra_flags(self.root, typed)
+        self.engine = Engine(root=self.root, env=env or {},
+                             extra_args=read_extra_flags(self.root))
         self.worker = EngineWorker(self.engine)
         self.worker.line.connect(self.log.appendPlainText)
         self.worker.ready.connect(self._on_ready)
         self.worker.failed.connect(self._on_failed)
+        self.worker.died.connect(self._on_died)
 
         self.open_button.setEnabled(False)
         self.open_button.setText("Starting…")
@@ -198,6 +236,26 @@ class LaunchPage(QtWidgets.QWidget):
         if not open_in_browser(url):
             self.status.setText(
                 "ComfyUI is running, but we could not open your browser for you.")
+
+    def _on_died(self, message: str) -> None:
+        """The engine went away on its own, after it had been running.
+
+        Everything on this screen still claimed it was running, and anything
+        waiting on it -- a browser tab, an easy-mode generation -- was waiting
+        on a program that no longer existed. Say so, show its last words, and
+        put the buttons back to a state that can start it again.
+        """
+        self.bar.setVisible(False)
+        self.stop_button.setVisible(False)
+        self.address.setVisible(False)
+        self.easy_button.setEnabled(False)
+        self.open_button.setEnabled(True)
+        self.open_button.setText("Start ComfyUI again")
+        self.status.setText(
+            f"{message} Its last output is below, and the full log is at "
+            f"{Layout(self.root).log_file}.")
+        self.show_log.setChecked(True)
+        self.engine_stopped.emit()
 
     def _on_failed(self, message: str, detail: str) -> None:
         self.bar.setVisible(False)
