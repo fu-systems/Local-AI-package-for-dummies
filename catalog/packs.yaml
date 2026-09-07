@@ -7,6 +7,11 @@
 # `recipe` below is the link between the two, and the loader reads the download
 # size from the generated file so the number can never drift from ground truth.
 #
+# `adult: true` moves a pack out of the modality groups and behind the gate on
+# the choose screen. It may never be `default_checked` -- the loader refuses the
+# catalogue outright if it is. No such pack exists yet: the model has not been
+# chosen and its facts are not frozen. See docs/ADULT-PACKS.md.
+#
 # VRAM floors marked provisional are engineering estimates, not measurements.
 # docs/PLAN.md M0 replaces them with real numbers taken on real cards. They are
 # deliberately conservative: offering a pack that then fails is worse than

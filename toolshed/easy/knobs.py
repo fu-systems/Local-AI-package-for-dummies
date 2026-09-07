@@ -93,6 +93,7 @@ class Knobs:
     seeds: list[Target] = field(default_factory=list)
     width: list[Target] = field(default_factory=list)
     height: list[Target] = field(default_factory=list)
+    length: list[Target] = field(default_factory=list)
     steps: list[Target] = field(default_factory=list)
     images: list[Target] = field(default_factory=list)
     controls: list[Control] = field(default_factory=list)
@@ -118,6 +119,17 @@ class Knobs:
     @property
     def has_size(self) -> bool:
         return bool(self.width and self.height)
+
+    @property
+    def is_video(self) -> bool:
+        """A latent with a frame count is a video, whatever the model is called.
+
+        Asked of the graph rather than the pack id, because it decides two
+        things that must not disagree: whether the length control appears, and
+        whether the decode is tiled. A table of pack ids here would answer one
+        of those correctly for a workflow somebody added and not the other.
+        """
+        return bool(self.length)
 
     @property
     def is_drivable(self) -> bool:
@@ -255,6 +267,13 @@ def analyse(prompt: dict[str, dict], specs: dict | None = None) -> Knobs:
         inputs = prompt[node_id].get("inputs", {})
         knobs.width.append(Target(node_id, "width", inputs["width"]))
         knobs.height.append(Target(node_id, "height", inputs["height"]))
+        # Frame count, on the same node as the size and found the same way. It
+        # is the largest single lever on graphics memory in a video workflow --
+        # the decoded frames are what the card runs out of room for -- and
+        # until now it had no role, so it appeared in the long list of every
+        # input with nothing to say it mattered.
+        if isinstance(inputs.get("length"), int):
+            knobs.length.append(Target(node_id, "length", inputs["length"]))
 
     # A node reached through both branches -- one encoder feeding positive and
     # negative alike -- must not be rewritten by the negative box, or typing a
@@ -271,7 +290,7 @@ def _roles_by_key(knobs: Knobs) -> dict[tuple[str, str], str]:
     """Which inputs already have a friendly control of their own."""
     named = {
         "prompt": knobs.positive, "negative": knobs.negative,
-        "width": knobs.width, "height": knobs.height,
+        "width": knobs.width, "height": knobs.height, "length": knobs.length,
         "steps": knobs.steps, "seed": knobs.seeds, "image": knobs.images,
     }
     return {(t.node_id, t.input_name): role
@@ -327,6 +346,7 @@ class Settings:
     negative: str | None = None
     width: int | None = None
     height: int | None = None
+    length: int | None = None        # frames, for video workflows
     steps: int | None = None
     seed: int | None = None          # None means "pick a new one"
     image: str | None = None         # a filename already uploaded to the engine
@@ -358,6 +378,8 @@ def apply(prompt: dict[str, dict], knobs: Knobs, settings: Settings) -> dict[str
         write(knobs.width, settings.width)
     if settings.height is not None:
         write(knobs.height, settings.height)
+    if settings.length is not None:
+        write(knobs.length, settings.length)
     if settings.steps is not None:
         write(knobs.steps, settings.steps)
     if settings.image is not None:
@@ -374,6 +396,70 @@ def apply(prompt: dict[str, dict], knobs: Knobs, settings: Settings) -> dict[str
     # broken -- and it is the single most confusing thing about these tools.
     write(knobs.seeds, settings.seed if settings.seed is not None
           else random.randrange(0, SEED_MAX))
+    return out
+
+
+# VAEDecodeTiled's own defaults, read from nodes.py at the tag we ship. Only
+# temporal_size matters here: its tooltip is "Only used for video VAEs: Amount
+# of frames to decode at a time", and decoding 64 frames at a time instead of
+# all of them is the whole point of doing this.
+TILED_DECODE_DEFAULTS = {
+    "tile_size": 512,
+    "overlap": 64,
+    "temporal_size": 64,
+    "temporal_overlap": 8,
+}
+TILED_DECODE_CLASS = "VAEDecodeTiled"
+PLAIN_DECODE_CLASS = "VAEDecode"
+
+# The tag whose nodes.py the input names above were read from. Same reasoning
+# as engine.FLAGS_VERIFIED_AGAINST: a renamed input would not fail loudly, it
+# would just come back as a validation error on somebody's first video.
+DECODE_VERIFIED_AGAINST = "v0.34.0"
+
+
+def use_tiled_decode(prompt: dict[str, dict], specs: dict | None = None) -> dict[str, dict]:
+    """Decode video a slice of frames at a time instead of all at once.
+
+    A finished video job dies at the very end, in VAEDecode, because that node
+    turns every frame into full-resolution pixels in one allocation -- 121
+    frames of 1280x704 in the template we ship. Sampling fits; the decode does
+    not. No engine flag helps, because none of them make a single allocation
+    smaller: --reserve-vram, --lowvram and dynamic VRAM all decide where model
+    *weights* live, and the weights were never the problem.
+
+    So this swaps the node for the tiled one, which does the same work in
+    slices. The cost is a little speed and, on some content, faint seams. The
+    benefit is that the failure is unreachable rather than merely predicted,
+    which is the difference easy mode exists to make.
+
+    Applied to the converted graph on its way to the engine, never to the
+    workflow file: the copy in ComfyUI stays exactly as Comfy Org authored it,
+    so the "Open in ComfyUI" path still shows the real template.
+
+    Without ``specs`` -- or against an engine with no VAEDecodeTiled -- the
+    graph is returned untouched. Sending a node the engine does not have would
+    turn a job that might have finished into one that certainly fails
+    validation.
+    """
+    if not specs or TILED_DECODE_CLASS not in specs:
+        return prompt
+
+    spec = specs.get(TILED_DECODE_CLASS)
+    accepted = set(getattr(spec, "inputs", ()) or ())
+
+    out: dict[str, dict] = {}
+    for node_id, node in prompt.items():
+        if node.get("class_type") != PLAIN_DECODE_CLASS:
+            out[node_id] = node
+            continue
+        inputs = dict(node.get("inputs", {}))
+        # Only the defaults this engine actually declares. An input added or
+        # renamed upstream is then dropped rather than rejected.
+        for name, value in TILED_DECODE_DEFAULTS.items():
+            if not accepted or name in accepted:
+                inputs[name] = value
+        out[node_id] = {**node, "class_type": TILED_DECODE_CLASS, "inputs": inputs}
     return out
 
 

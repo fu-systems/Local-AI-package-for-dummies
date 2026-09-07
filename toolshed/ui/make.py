@@ -27,6 +27,7 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from toolshed import resources
+from toolshed.catalog.presets import VideoPreset, default_preset, presets_for
 from toolshed.easy import knobs as knobs_module
 from toolshed.easy.convert import ConversionError, specs_from_object_info, to_api
 from toolshed.easy.knobs import Settings, analyse
@@ -278,6 +279,13 @@ class GenerateWorker(QtCore.QThread):
 
             graph = knobs_module.apply(prompt, knobs, settings)
 
+            # Video decodes every frame to full-resolution pixels in one go,
+            # which is where a job that sampled perfectly well runs the card
+            # out of memory -- minutes in, with nothing to show. Tiling that
+            # step is what makes the sizes on offer safe to offer.
+            if knobs.is_video:
+                graph = knobs_module.use_tiled_decode(graph, specs)
+
             self.note.emit("Queued.")
             outputs = self.client.run(
                 graph,
@@ -304,9 +312,15 @@ class GenerateWorker(QtCore.QThread):
 class MakePage(QtWidgets.QWidget):
     """The prompt box and the button."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, vram_gb: float | None = None) -> None:
         super().__init__()
         self.root = root
+        # What the card has, so video is offered at a size it can finish. None
+        # means detection failed, and presets_for deliberately reads that as
+        # "assume the smallest" rather than "assume the best".
+        self.vram_gb = vram_gb
+        self.video_presets: tuple[VideoPreset, ...] = presets_for(vram_gb)
+        self._is_video = False
         self.client: ComfyClient | None = None
         self.worker: GenerateWorker | None = None
         self.recipes: list[Recipe] = []
@@ -339,6 +353,26 @@ class MakePage(QtWidgets.QWidget):
         self.prompt.setPlaceholderText("Describe what you want…")
         self.prompt.setMaximumHeight(90)
         layout.addWidget(self.prompt)
+
+        # How long a video should be. Up here rather than in the optional
+        # panels because for video it is not an optional detail: it is the
+        # difference between a job that finishes and one that runs for minutes
+        # and dies at the decode. Every entry on the list fits the card, so
+        # there is no wrong answer to pick and nothing to warn about.
+        self.video_row = QtWidgets.QWidget()
+        video_layout = QtWidgets.QHBoxLayout(self.video_row)
+        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.addWidget(QtWidgets.QLabel("Video length:"))
+        self.video_size = QtWidgets.QComboBox()
+        for preset in self.video_presets:
+            self.video_size.addItem(preset.label, preset)
+        chosen = default_preset(self.video_presets)
+        if chosen is not None:
+            self.video_size.setCurrentIndex(self.video_presets.index(chosen))
+        self.video_size.currentIndexChanged.connect(self._apply_video_preset)
+        video_layout.addWidget(self.video_size, 1)
+        self.video_row.setVisible(False)
+        layout.addWidget(self.video_row)
 
         # Starting picture. Shown only for workflows that load one -- turning a
         # photo into a 3D model, or editing a picture. Without it those packs
@@ -542,6 +576,8 @@ class MakePage(QtWidgets.QWidget):
 
         # A workflow with no text encoder has nothing to do with a prompt box.
         self.prompt.setVisible(knobs.takes_text)
+        self._is_video = knobs.is_video and bool(self.video_presets)
+        self.video_row.setVisible(self._is_video)
         self.picture_row.setVisible(knobs.takes_picture)
         if knobs.takes_picture and self.picture is None:
             starter = starter_picture()
@@ -552,6 +588,11 @@ class MakePage(QtWidgets.QWidget):
         size = knobs.current_size
         if size:
             self._on_analysed(*size)
+        # After _on_analysed, which fills the size boxes with the workflow's
+        # own size. For video that is the template's 1280x704, which is exactly
+        # the size we are here to stop being asked for on a card that cannot
+        # finish it.
+        self._apply_video_preset()
 
         while self.settings_form.rowCount():
             self.settings_form.removeRow(0)
@@ -586,6 +627,10 @@ class MakePage(QtWidgets.QWidget):
             size = self.knobs.current_size
             if size:
                 self._on_analysed(*size)
+        # Reset means "back to what works", which for video is the preset for
+        # this card -- not the template's size, which is what the card could
+        # not finish in the first place.
+        self._apply_video_preset()
 
     # -- the starting picture -------------------------------------------------
 
@@ -646,14 +691,48 @@ class MakePage(QtWidgets.QWidget):
 
     # -- doing it -----------------------------------------------------------
 
+    def _apply_video_preset(self) -> None:
+        """Write the chosen video size into the size boxes.
+
+        So the optional panel shows what is actually going to be asked for,
+        rather than the template's size while something else is sent. Typing
+        over the top still wins -- until the dropdown is used again, which is
+        someone choosing a size and should overrule what was there.
+        """
+        preset = self.current_video_preset()
+        if preset is None:
+            return
+        self.width.setValue(preset.width)
+        self.height.setValue(preset.height)
+
+    def current_video_preset(self) -> VideoPreset | None:
+        """The chosen video size, or None when this is not a video workflow.
+
+        Keyed off what the graph said, not off ``video_row.isVisible()``: Qt
+        reports a widget as not visible whenever any ancestor is unshown, so
+        asking the widget would silently drop the preset whenever this page is
+        not the one on top of the stack -- and then only for some callers.
+        """
+        if not self._is_video:
+            return None
+        data = self.video_size.currentData()
+        return data if isinstance(data, VideoPreset) else None
+
     def settings(self) -> Settings:
         overrides = {row.control.key: row.value() for row in self.rows
                      if row.control.value is not None}
+        # Width and height come from the boxes, as they always have. For video
+        # the preset has already written itself into them, so what the optional
+        # panel shows is what is actually going to be asked for -- and a number
+        # typed over the top still wins, because it is simply what the box says
+        # by the time this reads it.
+        preset = self.current_video_preset()
         return Settings(
             prompt=self.prompt.toPlainText().strip() or None,
             negative=self.negative.text().strip() or None,
             width=self.width.value() or None,
             height=self.height.value() or None,
+            length=preset.length if preset else None,
             seed=self.seed.value() if self.same_seed.isChecked() else None,
             overrides=overrides,
         )

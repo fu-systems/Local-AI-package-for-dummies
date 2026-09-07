@@ -153,7 +153,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.install_page.stopped.connect(self._on_install_stopped)
             self.launch_page = LaunchPage(default_data_root())
             self.launch_page.want_more_packs.connect(self._go_choose_packs)
-            self.make_page = MakePage(default_data_root())
+            gpu = report.primary
+            self.make_page = MakePage(default_data_root(),
+                                      vram_gb=gpu.vram_gb if gpu else None)
             self.launch_page.want_easy_mode.connect(self._go_easy_mode)
             self.launch_page.engine_ready.connect(self._on_engine_ready)
             self.launch_page.engine_stopped.connect(

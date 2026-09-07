@@ -87,6 +87,12 @@ description, press the button. Everything else already has a working value —
 size, steps, sampler, which model, the picture a 3D model starts from — so
 nothing needs touching on the first run, or any run.
 
+For video there is one extra box, because video is the one thing that can run
+for minutes and then fail: **Video length**, offering only sizes your graphics
+card can actually finish. Nothing on that list needs a warning, and easy mode
+decodes video in slices so the last step cannot run you out of memory. ComfyUI's
+own copy of the workflow is untouched.
+
 The settings are all there when you want them, in two panels that are shut by
 default and labelled optional. They are built from what your ComfyUI actually
 reports, so the numbers have the real limits and the dropdowns list the models

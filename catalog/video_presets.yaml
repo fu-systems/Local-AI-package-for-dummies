@@ -1,0 +1,103 @@
+# Video sizes offered in easy mode, per graphics card.
+#
+# This file exists because a beginner cannot answer "how many frames at what
+# resolution will fit in 20 GB?", and should never be asked. Easy mode offers
+# the combinations that run on the card in the machine, and the advanced panel
+# is still there for anyone who wants to go past them.
+#
+# Not a warning. `Pack.unavailable_reason` already sets the pattern: a pack
+# above the card's floor is greyed out with the reason, not offered with a
+# caution. Same here -- what is on the list runs.
+#
+# ---------------------------------------------------------------------------
+# EVERY NUMBER BELOW IS PROVISIONAL.
+#
+# They are conservative engineering estimates, not measurements, exactly as the
+# `vram_gb_min` floors in packs.yaml are, and they are deliberately timid for
+# the same reason: offering a size that then dies at the decode is worse than
+# withholding one that might have worked.
+#
+# docs/PLAN.md M0 replaces them with real numbers taken on real cards. Until
+# then, a measured value beats anything here -- see docs/VIDEO-MEMORY.md for
+# how to take them.
+# ---------------------------------------------------------------------------
+#
+# Constraints on the numbers, read from ComfyUI v0.34.0 and not negotiable:
+#
+#   Wan22ImageToVideoLatent  width/height  min 32, step 32
+#                            length        min 1,  step 4   (so 4n+1)
+#   comfy_extras/nodes_wan.py, node default length is 49; the template we ship
+#   overrides it to 121.
+#
+# Durations assume the 24 fps the shipped workflow's CreateVideo node uses. A
+# workflow at another rate makes them approximate, which is why the label says
+# "about".
+
+schema_version: 1
+
+# Highest floor first; the first tier a card meets is the one it gets. The last
+# tier must have vram_gb_min 0, so there is always an answer -- including when
+# VRAM could not be read at all, which lands here deliberately.
+tiers:
+  - vram_gb_min: 24
+    presets:
+      - id: short
+        label: "Short — about 2 seconds"
+        width: 1280
+        height: 704
+        length: 49
+      - id: standard
+        label: "Standard — about 3 seconds"
+        width: 1280
+        height: 704
+        length: 81
+        default: true
+      - id: long
+        label: "Long — about 5 seconds"
+        width: 1280
+        height: 704
+        length: 121
+
+  - vram_gb_min: 16
+    presets:
+      - id: short
+        label: "Short — about 2 seconds"
+        width: 1280
+        height: 704
+        length: 49
+        default: true
+      - id: standard
+        label: "Standard — about 3 seconds"
+        width: 1280
+        height: 704
+        length: 81
+
+  - vram_gb_min: 12
+    presets:
+      - id: short
+        label: "Short — about 2 seconds"
+        width: 832
+        height: 480
+        length: 49
+        default: true
+      - id: standard
+        label: "Standard — about 3 seconds"
+        width: 832
+        height: 480
+        length: 81
+
+  # Everything else, including a card whose memory could not be read. The
+  # smallest thing that is still worth watching.
+  - vram_gb_min: 0
+    presets:
+      - id: short
+        label: "Short — about 2 seconds"
+        width: 640
+        height: 352
+        length: 49
+        default: true
+      - id: standard
+        label: "Standard — about 3 seconds"
+        width: 640
+        height: 352
+        length: 81

@@ -38,6 +38,11 @@ class Pack:
     default_checked: bool = False
     experimental_on: tuple[str, ...] = ()
     download_bytes: int | None = None
+    # Explicit sexual content. Kept out of the modality groups, off by default,
+    # and shown only after the person has said they want to see it -- see
+    # docs/ADULT-PACKS.md for why this is a flag on the pack rather than a
+    # separate catalogue.
+    adult: bool = False
 
     @property
     def download_gb(self) -> float | None:
@@ -77,6 +82,12 @@ def load_packs() -> tuple[Pack, ...]:
 
     packs: list[Pack] = []
     for entry in doc.get("packs", []):
+        adult = bool(entry.get("adult", False))
+        if adult and entry.get("default_checked"):
+            # Not a warning to be tidied up later: a pre-ticked adult pack means
+            # someone clicking Continue through the defaults downloads porn they
+            # never asked for. Refuse the catalogue rather than the checkbox.
+            raise ValueError(f"{entry['id']}: an adult pack cannot be default_checked")
         packs.append(
             Pack(
                 id=entry["id"],
@@ -89,9 +100,20 @@ def load_packs() -> tuple[Pack, ...]:
                 default_checked=bool(entry.get("default_checked", False)),
                 experimental_on=tuple(entry.get("experimental_on", ())),
                 download_bytes=_recipe_size(entry["recipe"], catalog_dir),
+                adult=adult,
             )
         )
     return tuple(packs)
+
+
+def general(packs: tuple[Pack, ...]) -> tuple[Pack, ...]:
+    """Everything that belongs in the ordinary modality groups."""
+    return tuple(p for p in packs if not p.adult)
+
+
+def adult(packs: tuple[Pack, ...]) -> tuple[Pack, ...]:
+    """The packs that go behind the gate, in catalogue order."""
+    return tuple(p for p in packs if p.adult)
 
 
 def modalities(packs: tuple[Pack, ...]) -> list[str]:
