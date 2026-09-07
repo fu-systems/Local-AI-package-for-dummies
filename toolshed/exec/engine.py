@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -77,6 +77,141 @@ def choose_port(preferred: int = DEFAULT_PORT) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind((HOST, 0))
         return probe.getsockname()[1]
+
+
+@dataclass(frozen=True)
+class Safeguard:
+    """One ComfyUI default we turn off because it crashes this kind of machine.
+
+    ``concern`` is the substring that means the user has taken this decision
+    over in Extra ComfyUI options. Typing ``--async-offload`` there puts the
+    default back, and we then add nothing about it -- rather than trying to
+    out-argue argparse over which of a pair of opposing flags wins.
+    """
+
+    flag: str
+    concern: str
+    plain_english: str
+
+
+# ComfyUI turns on async weight offloading and pinned host memory by default.
+# Its own help text says async offload is "Enabled by default on Nvidia", but
+# a gfx1100 on ROCm 7.2 logs "Using async weight offloading with 2 streams" and
+# "Enabled pinned memory 14909" -- so it is on for AMD too, and the help is
+# describing an intention rather than the behaviour.
+#
+# Both move weights between the card and main memory by direct memory access,
+# and that is where this configuration dies. Twice, at the moment a large model
+# is swapped out to make room for a VAE:
+#
+#     Requested to load WanVAE
+#     Memory access fault by GPU node-1 ... on address 0x7f1396928000.
+#     Reason: Page not present or supervisor privilege.
+#
+# 0x7f… is a host address. A graphics card faulting on host memory means a
+# transfer was set up against pages that were not mapped for it. Both crashes
+# came after minutes of successful sampling, at the first model swap, which is
+# exactly when these two paths are used and never used before.
+#
+# Turning them off slows model swapping and nothing else -- sampling is
+# untouched. The trade is a few seconds per model change against losing seven
+# minutes of finished work to an abort.
+AMD_SAFEGUARDS = (
+    Safeguard("--disable-async-offload", "async-offload",
+              "moving model weights in the background while the card works"),
+    Safeguard("--disable-pinned-memory", "pinned-memory",
+              "reserving main memory the card can read from directly"),
+)
+
+
+# The tag whose cli_args.py these flags were read from. An engine that renames
+# one is handled safely -- engine_understands drops it rather than producing a
+# command line ComfyUI refuses -- but *safely* is not the same as *silently*,
+# and a dropped safeguard means the crash comes back. So: bumping ENGINE_TAG
+# fails a test until someone re-reads the flags and moves this with it.
+FLAGS_VERIFIED_AGAINST = "v0.34.0"
+
+
+@dataclass(frozen=True)
+class Safeguards:
+    """What we could and could not do about a machine's known failure.
+
+    ``unavailable`` is the field that matters. A safeguard we meant to apply
+    and could not is the exact shape of the original bug returning unannounced,
+    so it is carried out of here to be said out loud rather than dropped.
+    """
+
+    applied: tuple[Safeguard, ...] = ()
+    unavailable: tuple[Safeguard, ...] = ()
+    overridden: tuple[Safeguard, ...] = ()
+
+    @property
+    def flags(self) -> list[str]:
+        return [s.flag for s in self.applied]
+
+
+# Verbatim from two crash logs on a gfx1100, seven minutes into a job each
+# time. Only strings actually seen in a log belong here: a guessed one would
+# either never match or, worse, explain the wrong thing confidently.
+CRASH_SIGNS = (
+    ("Memory access fault by GPU node",
+     "ComfyUI hit a graphics memory fault and was stopped by the driver. "
+     "That is not your workflow and not something you did, but the work in "
+     "progress is lost. Toolshed already starts AMD cards with the two "
+     "transfer options that usually cause it switched off. If this keeps "
+     "happening, add --disable-dynamic-vram to Extra ComfyUI options."),
+)
+
+
+def explain_crash(log_tail: str) -> str | None:
+    """A specific explanation when the log carries a known fault, else None.
+
+    An exit code says the process aborted; the log says why. Reading it here is
+    the difference between a user being told what happened and a user copying
+    two hundred lines of module names to someone who can read them.
+    """
+    for sign, explanation in CRASH_SIGNS:
+        if sign in log_tail:
+            return explanation
+    return None
+
+
+def engine_understands(engine_dir: Path, flag: str) -> bool:
+    """Does the installed ComfyUI accept this option?
+
+    Read from its own ``cli_args.py`` as text. Passing an option ComfyUI does
+    not know makes argparse print usage and exit before the server starts, so
+    an unrecognised flag would turn "crashes at the end of a long job" into
+    "never starts at all" -- a worse failure, and one we cannot rehearse here
+    because we do not have the engine or the card.
+
+    Read, not imported: importing ComfyUI is the line this project does not
+    cross. Unreadable means no, so an engine laid out differently by a future
+    version gets the stock defaults rather than a broken command line.
+    """
+    try:
+        source = (engine_dir / "comfy" / "cli_args.py").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return f'"{flag}"' in source or f"'{flag}'" in source
+
+
+def choose_safeguards(engine_dir: Path, *, rocm: bool,
+                      extra: Sequence[str] = ()) -> Safeguards:
+    """Which safeguards this machine needs, and which of them we can apply."""
+    if not rocm:
+        return Safeguards()
+    typed = " ".join(extra)
+    applied, unavailable, overridden = [], [], []
+    for guard in AMD_SAFEGUARDS:
+        if guard.concern in typed:
+            overridden.append(guard)          # the user has taken this over
+        elif engine_understands(engine_dir, guard.flag):
+            applied.append(guard)
+        else:
+            unavailable.append(guard)         # say so; never drop it quietly
+    return Safeguards(tuple(applied), tuple(unavailable), tuple(overridden))
 
 
 @dataclass(frozen=True)
@@ -150,6 +285,7 @@ class Engine:
     env: dict[str, str] = field(default_factory=dict)
     port: int = 0
     extra_args: list[str] = field(default_factory=list)
+    safe_args: list[str] = field(default_factory=list)
     process: subprocess.Popen | None = None
     _log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINES_KEPT))
     _reader: threading.Thread | None = None
@@ -186,6 +322,10 @@ class Engine:
             "--port", str(self.port),
             "--disable-auto-launch",
             "--log-stdout",
+            # Defaults switched off because they crash this machine. Before the
+            # user's own options, not after, so anything they type still has
+            # the last word.
+            *self.safe_args,
             # Whatever the user added. Last, so it can override anything above
             # -- argparse takes the later value for a repeated option, which is
             # what makes this an escape hatch rather than a suggestion box.
@@ -324,7 +464,12 @@ class Engine:
         the process with SIGABRT, which arrives here as -6. It is not something
         the user did, and it is not out of memory, so it should not be reported
         as either.
+
+        The log is consulted before the exit code, because -6 covers every
+        abort and the log says which one this was.
         """
+        if code != 0 and (known := explain_crash(self.tail(200))):
+            return known
         if code == 0:
             return "ComfyUI closed on its own."
         if sys.platform == "win32":

@@ -33,6 +33,18 @@ Toolshed downloads ComfyUI and drives it as a separate process over HTTP. Never
 import it, never bundle it, never place our code under `custom_nodes/`. CI
 enforces this; see `CONTRIBUTING.md`.
 
+## Bumping ComfyUI means re-reading its flags
+
+The launcher passes `--disable-async-offload` and `--disable-pinned-memory` on
+AMD, because without them a graphics memory fault killed two finished jobs. Both
+spellings were read from `comfy/cli_args.py` at the tag we ship.
+
+A flag the installed engine does not recognise is dropped rather than passed,
+since an unknown option stops ComfyUI starting at all — but that means a rename
+brings the crash back with nothing saying why. So raising `ENGINE_TAG` fails a
+test until the flags are re-read at the new tag and `FLAGS_VERIFIED_AGAINST` is
+moved to match. Do the reading; do not just move the string.
+
 ## Verify builds on Python 3.12
 
 `pyproject.toml` requires 3.12 and CI uses 3.12. Verifying a packaging change on

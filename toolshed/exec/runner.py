@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import shutil
 import tarfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -35,6 +36,11 @@ from toolshed.exec.download import (
 )
 from toolshed.exec.manifest import Entry, Manifest
 from toolshed.planner.plan import MODEL_DIRS, InstallPlan, Kind, Step
+
+# How long a subprocess may go with no output *and* no bytes arriving before
+# we call it stuck. Not a total budget: a 4 GB download on a slow line takes
+# longer than any total we would dare set, and is fine as long as it moves.
+STALL_SECONDS = 900
 
 
 class Level(StrEnum):
@@ -228,12 +234,8 @@ class Runner:
         index = step.payload.get("index_url")
         if not index:
             raise InstallFailed("No suitable PyTorch build for this machine.", step=step)
-        uv = uvtool.uv_path(self.runtime)
-        result = uvtool.pip_install(
-            uv, self.runtime, ["torch", "torchvision", "torchaudio"],
-            index_url=index, log=self._log, timeout=3600, should_cancel=self.should_cancel)
-        if not result.ok:
-            raise InstallFailed("Could not install the graphics card software.", step=step)
+        self._pip_install_watched(step, ["torch", "torchvision", "torchaudio"],
+                                  index_url=index, what="the graphics card software")
         self.manifest.torch_index = index
         # Recorded so the launcher starts the engine with the same environment
         # the card was verified under. Without it an AMD card that needs the
@@ -289,14 +291,120 @@ class Runner:
         reqs = self.engine / "requirements.txt"
         if not reqs.is_file():
             raise InstallFailed("The engine download looks incomplete.", step=step)
-        uv = uvtool.uv_path(self.runtime)
         # Against PyPI, not the torch index: the previous step replaced the
         # index entirely, and these are ordinary packages.
-        result = uvtool.pip_install(uv, self.runtime, ["-r", str(reqs)],
-                                    log=self._log, timeout=2400,
-                                    should_cancel=self.should_cancel)
-        if not result.ok:
-            raise InstallFailed("Could not install the engine's dependencies.", step=step)
+        self._pip_install_watched(step, ["-r", str(reqs)], index_url=None,
+                                  what="the engine's dependencies")
+
+    def _pip_install_watched(self, step: Step, packages: list[str], *,
+                             index_url: str | None, what: str) -> None:
+        """A pip install that looks like every other download on the screen.
+
+        uv says nothing while it fetches, and the PyTorch build is gigabytes.
+        So: ask uv what it would fetch, look the files up for their sizes,
+        download them ourselves -- the same bar, the same "2.3 / 4.6 GB", the
+        same resume -- and hand uv the folder to install from offline. If any
+        part of that cannot be worked out, uv fetches as before and our count
+        of its cache stands in for a bar.
+        """
+        uv = uvtool.uv_path(self.runtime)
+        self._emit("progress", step=step, message="Working out which files are needed…")
+        wanted = uvtool.plan_install(uv, self.runtime, packages, index_url=index_url,
+                                     should_cancel=self.should_cancel)
+        self._check_cancelled()
+
+        find_links = None
+        if wanted:
+            located = uvtool.locate(wanted, index_url or uvtool.PYPI_SIMPLE, token=None)
+            if all(f.url for f in located):
+                find_links = self.root / "state" / "downloads" / "wheels"
+                self._fetch_wheels(step, located, find_links)
+            else:
+                missing = [f.filename for f in located if not f.url]
+                self._log(f"Could not find {missing[0]} on the index to size it up; "
+                          f"letting uv fetch instead.")
+
+        install = uvtool.pip_install(
+            uv, self.runtime, packages, index_url=index_url, log=self._log,
+            timeout=STALL_SECONDS, should_cancel=self.should_cancel,
+            heartbeat=self._watch_uv_cache(step), find_links=find_links)
+        if not install.ok and find_links is not None:
+            # The files are all there, so this is uv disagreeing with its own
+            # dry run. Rare; let it fetch for itself rather than fail.
+            self._log("Installing from the downloaded files did not work; "
+                      "asking uv to fetch them itself.")
+            install = uvtool.pip_install(
+                uv, self.runtime, packages, index_url=index_url, log=self._log,
+                timeout=STALL_SECONDS, should_cancel=self.should_cancel,
+                heartbeat=self._watch_uv_cache(step))
+        if not install.ok:
+            raise InstallFailed(f"Could not install {what}. "
+                                + (install.stderr or "See the log for what uv said."),
+                                step=step)
+        if find_links is not None:
+            # uv has unpacked them into the workspace; gigabytes of wheel files
+            # kept as well would double what this step costs in disk.
+            shutil.rmtree(find_links, ignore_errors=True)
+
+    def _fetch_wheels(self, step: Step, files: list[uvtool.WheelFile], into) -> None:
+        """Download uv's shopping list with the models' own progress bar."""
+        into.mkdir(parents=True, exist_ok=True)
+        total = sum(f.size_bytes for f in files)
+        self._log(f"{len(files)} files, {total / 1e9:.1f} GB to download.")
+        done = 0
+        for item in files:
+            self._check_cancelled()
+            target = into / item.filename
+            if (target.is_file() and item.size_bytes
+                    and target.stat().st_size == item.size_bytes and not item.sha256):
+                done += item.size_bytes
+                continue
+
+            def progress(p, base=done, name=item.filename):
+                self._emit("progress", step=step,
+                           fraction=(base + p.downloaded) / max(total, 1),
+                           bytes_done=base + p.downloaded, bytes_total=total,
+                           message=f"{name} — {p.bytes_per_second / 1e6:.1f} MB/s")
+
+            download_file(item.url, target, sha256=item.sha256 or None,
+                          size_bytes=item.size_bytes, attempts=self.attempts,
+                          on_progress=progress, should_cancel=self.should_cancel)
+            done += target.stat().st_size
+        self._emit("progress", step=step, fraction=1.0, bytes_done=done, bytes_total=total,
+                   message="Downloaded. Unpacking…")
+
+    def _watch_uv_cache(self, step: Step) -> Callable[[], bool]:
+        """Something to show while uv downloads in silence.
+
+        uv unzips wheels into its cache as the bytes arrive, so the cache's size
+        is a live count of what has been received. Reported as our own line
+        under the step, with a rate, so a twenty-minute download reads as a
+        download and not as a hang. Returns whether anything arrived since the
+        last look, which is what keeps the stall deadline from firing on a slow
+        but healthy connection.
+        """
+        start_bytes = last_bytes = uvtool.cache_bytes(self.runtime)
+        start_time = last_time = time.monotonic()
+
+        def beat() -> bool:
+            nonlocal last_bytes, last_time
+            now_bytes = uvtool.cache_bytes(self.runtime)
+            now = time.monotonic()
+            grew = now_bytes > last_bytes
+            if grew:
+                rate = (now_bytes - last_bytes) / max(now - last_time, 1e-6)
+                received = now_bytes - start_bytes
+                self._emit("progress", step=step,
+                           message=f"{received / 1e9:.2f} GB received so far — "
+                                   f"{rate / 1e6:.1f} MB/s")
+            elif now - start_time > 20 and now_bytes == start_bytes:
+                self._emit("progress", step=step,
+                           message="Waiting for the download to start… "
+                                   "(working out which files are needed)")
+            last_bytes, last_time = now_bytes, now
+            return grew
+
+        return beat
 
     def _make_dirs(self, step: Step) -> None:
         for name in step.payload.get("model_dirs", MODEL_DIRS):

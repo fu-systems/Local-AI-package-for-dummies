@@ -75,11 +75,21 @@ def run(
     cwd: Path | None = None,
     on_line: Callable[[str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    heartbeat: Callable[[], bool] | None = None,
+    heartbeat_every: float = 5.0,
 ) -> Result:
-    """Run a command to completion, streaming its output, with a hard deadline.
+    """Run a command to completion, streaming its output, with a stall deadline.
 
     ``on_line`` receives each line as it appears, so the user sees a log moving
     rather than a frozen window during a five-minute pip install.
+
+    ``timeout`` is how long the child may show **no sign of life**, not how
+    long it may run. Every line of output resets it, and so does ``heartbeat``
+    returning True: it is called every ``heartbeat_every`` seconds and can look
+    for progress the child does not print -- uv says nothing at all while it
+    downloads gigabytes of PyTorch, but its cache grows. A fixed total budget
+    was wrong in both directions: it killed a slow connection's download at 60
+    minutes and would have waited the full 60 for a child that was truly stuck.
 
     ``should_cancel`` is polled while the child runs. Stop used to work only
     between steps and inside downloads; pressed during a twenty-minute pip
@@ -122,6 +132,8 @@ def run(
     reader.start()
 
     deadline = time.monotonic() + timeout
+    seen_lines = 0
+    next_beat = time.monotonic() + heartbeat_every
     try:
         while True:
             if process.poll() is not None:
@@ -130,12 +142,20 @@ def run(
                 terminate_tree(process)
                 reader.join(timeout=5)
                 raise Cancelled()
-            if time.monotonic() >= deadline:
+            now = time.monotonic()
+            if len(lines) != seen_lines:
+                seen_lines = len(lines)
+                deadline = now + timeout
+            if heartbeat and now >= next_beat:
+                next_beat = now + heartbeat_every
+                if heartbeat():
+                    deadline = now + timeout
+            if now >= deadline:
                 terminate_tree(process)
                 reader.join(timeout=5)
                 return Result(
                     -1, "\n".join(lines),
-                    f"{argv[0]} did not finish within {timeout:.0f} seconds.")
+                    f"{argv[0]} showed no sign of progress for {timeout:.0f} seconds.")
             time.sleep(0.05)
     except BaseException:
         terminate_tree(process)

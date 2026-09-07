@@ -283,3 +283,26 @@ def test_ci_installs_the_project_rather_than_naming_packages():
         f"ci.yml names packages by hand: {offenders}. "
         f"Declare them in pyproject.toml instead; CI installs from there."
     )
+
+
+def test_the_engine_flags_were_verified_against_the_engine_we_ship():
+    """A bumped ComfyUI must not silently invalidate the safeguard flags.
+
+    The launcher passes --disable-async-offload and --disable-pinned-memory to
+    stop a graphics memory fault that killed two finished jobs. Both spellings
+    were read from ComfyUI's own cli_args.py at one tag. If a later version
+    renames either, the launcher drops it -- safely, because an unknown flag
+    would stop the engine starting, but the crash comes back.
+
+    So bumping the engine fails here until someone re-reads the flags at the
+    new tag and moves FLAGS_VERIFIED_AGAINST with it.
+    """
+    from toolshed.exec.engine import FLAGS_VERIFIED_AGAINST
+    from toolshed.planner.plan import ENGINE_TAG
+
+    assert FLAGS_VERIFIED_AGAINST == ENGINE_TAG, (
+        f"ComfyUI moved to {ENGINE_TAG} but the engine flags were last read at "
+        f"{FLAGS_VERIFIED_AGAINST}. Re-read comfy/cli_args.py at {ENGINE_TAG}, "
+        f"confirm --disable-async-offload and --disable-pinned-memory are still "
+        f"spelt that way, then update FLAGS_VERIFIED_AGAINST."
+    )

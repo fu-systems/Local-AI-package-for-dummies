@@ -417,7 +417,11 @@ class TestTheEngineDyingWhileRunning:
                 time.sleep(0.1)
 
             assert deaths, "the engine died and nothing noticed"
-            assert "graphics driver" in deaths[0], deaths[0]
+            # The fake prints the real fault line, so the report must name the
+            # fault rather than settle for "stopped by the graphics driver":
+            # -6 covers every abort, and only the log says which one this was.
+            assert "graphics memory fault" in deaths[0], deaths[0]
+            assert "--disable-dynamic-vram" in deaths[0], "no next step offered"
             assert not engine.is_running()
         finally:
             engine.stop()
