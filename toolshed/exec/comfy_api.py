@@ -75,6 +75,16 @@ class Output:
     def is_picture(self) -> bool:
         return self.kind == "images"
 
+    @property
+    def is_saved(self) -> bool:
+        """Is this a file that is still there after the run?
+
+        Previews go to ComfyUI's temp directory, which it empties. Telling
+        someone their model is in the output folder when it was a preview is
+        how "it says it worked and there is nothing there" happens.
+        """
+        return self.type == "output"
+
 
 @dataclass
 class Progress:
@@ -101,6 +111,27 @@ CancelFn = Callable[[], bool]
 # The first version of this table had a "3d" key that nothing ever writes, so
 # a finished 3D model was reported as "produced no files".
 OUTPUT_KEYS = ("images", "audio", "video", "gifs", "files")
+
+# 3D nodes that write a preview into the temp directory and report it in the
+# same "result" shape a saver uses. Read from comfy_extras/nodes_load_3d.py at
+# v0.34.0, where Preview3DAdvanced does:
+#
+#     filename = f"preview3d_advanced_{uuid.uuid4().hex}.{model_3d.format}"
+#     model_3d.save_to(os.path.join(folder_paths.get_temp_directory(), filename))
+#     ... ui=UI.PreviewUI3DAdvanced(filename, ...)
+#
+# while Save3DAdvanced goes through _save_file3d_to_output, which writes into
+# folder_paths.get_output_directory() and returns "<subfolder>/<name>".
+#
+# History does not say which is which -- both arrive as {"result": [name, ...]}
+# -- so the node class is the only honest way to tell them apart, and the
+# converted graph is where that lives. Calling all of them "output" made the 3D
+# pack report three finished models where one had been saved, and sent anyone
+# looking for the other two to a folder that never held them.
+PREVIEW_3D_CLASSES = frozenset({
+    "Preview3D", "Preview3DAdvanced", "PreviewGaussianSplat",
+})
+PREVIEW_3D_VERIFIED_AGAINST = "v0.34.0"
 
 
 @dataclass
@@ -290,7 +321,7 @@ class ComfyClient:
                     # outputs were all cached can finish on this alone.
                     break
 
-        return outputs_from_history(self._history_when_ready(prompt_id))
+        return outputs_from_history(self._history_when_ready(prompt_id), prompt)
 
     def _history_when_ready(self, prompt_id: str) -> dict:
         """The history entry, once the engine has actually written it."""
@@ -340,10 +371,17 @@ def _progress_from(data: dict, titles: dict[str, str]) -> Progress:
     )
 
 
-def outputs_from_history(entry: dict) -> list[Output]:
-    """Every file a finished run produced, in node order."""
+def outputs_from_history(entry: dict, graph: dict | None = None) -> list[Output]:
+    """Every file a finished run produced, in node order.
+
+    ``graph`` is the converted prompt that was sent. It is what tells a saved
+    3D model apart from a preview of one, because the history entry does not:
+    both report ``{"result": [name, ...]}`` and only the node class says which
+    directory the name is in. Without it, previews are still assumed to be
+    saved files -- the old behaviour, and wrong, but not worse than it was.
+    """
     found: list[Output] = []
-    for node_output in (entry.get("outputs") or {}).values():
+    for node_id, node_output in (entry.get("outputs") or {}).items():
         animated = bool((node_output.get("animated") or [False])[0]) \
             if isinstance(node_output.get("animated"), (list, tuple)) else False
         for key in OUTPUT_KEYS:
@@ -364,8 +402,10 @@ def outputs_from_history(entry: dict) -> list[Output]:
         if isinstance(result, (list, tuple)) and result and isinstance(result[0], str):
             name = result[0]
             subfolder, _, filename = name.rpartition("/")
+            node_class = ((graph or {}).get(node_id) or {}).get("class_type", "")
+            preview = node_class in PREVIEW_3D_CLASSES
             found.append(Output(filename=filename or name, subfolder=subfolder,
-                                type="output", kind="3d"))
+                                type="temp" if preview else "output", kind="3d"))
     return found
 
 

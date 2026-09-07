@@ -21,6 +21,8 @@ anything about any of them.
 from __future__ import annotations
 
 import random
+import subprocess
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -329,6 +331,8 @@ class MakePage(QtWidgets.QWidget):
         self.knobs = None
         self.rows: list[ControlRow] = []
         self.picture: Path | None = None
+        # The last saved file, so Open the folder opens the one holding it.
+        self._last_saved: Output | None = None
         self.inspector: InspectWorker | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -792,15 +796,40 @@ class MakePage(QtWidgets.QWidget):
             self.status.setText("It finished, but produced no files.")
             return
 
+        # Previews live in ComfyUI's temp directory and are gone shortly after.
+        # Only saved files can be gone and looked at, so only they decide what
+        # the screen says was made and where it is.
+        saved = [o for o in outputs if o.is_saved]
         pictures = [o for o in outputs if o.is_picture]
+
+        # The picture is shown whenever there is one, saved or not -- seeing
+        # the mask a 3D run made is useful. It is just not the answer to
+        # "where is my model", which is what this used to imply by saying
+        # nothing else.
         if pictures and self.client:
             self._show_picture(pictures[0])
-            self.status.setText(f"Done. Saved to {self.root / 'output'}.")
-        else:
-            kinds = ", ".join(sorted({o.kind for o in outputs}))
-            self.preview.setText(
-                f"Made {len(outputs)} file(s) — {kinds}.\nOpen the folder to play it.")
-            self.status.setText(f"Done. Saved to {self.root / 'output'}.")
+
+        if not saved:
+            self.preview.setText("")
+            self.status.setText(
+                "It finished, but only made previews — nothing was saved to disk. "
+                "The workflow has no save step in it.")
+            return
+
+        # Name the file. A 3D pack saves into output/3d/, and being told
+        # "saved to output" while the model sat in a subfolder is exactly how
+        # a finished model goes missing.
+        # A model, a song or a video is the result; a picture beside it is a
+        # by-product. Prefer the one the person actually asked for.
+        headline = next((o for o in saved if not o.is_picture), saved[0])
+        self._last_saved = headline
+        where = self.output_dir_for(headline)
+        if not pictures:
+            kinds = ", ".join(sorted({o.kind for o in saved}))
+            self.preview.setText(f"Made {len(saved)} file(s) — {kinds}.")
+        noun = "file" if len(saved) == 1 else "files"
+        self.status.setText(
+            f"Done. {len(saved)} {noun} saved. {headline.filename} is in {where}.")
 
     def _show_picture(self, item: Output) -> None:
         """Fetch the picture over the API rather than guessing where it landed.
@@ -835,10 +864,51 @@ class MakePage(QtWidgets.QWidget):
         if detail:
             self.status.setToolTip(detail)
 
+    def output_dir_for(self, item: Output | None = None) -> Path:
+        """The folder a produced file is actually in.
+
+        ComfyUI puts a file where its save node's filename_prefix says, and the
+        3D pack's prefix is ``3d/ComfyUI`` -- so the model lands in
+        ``output/3d`` while every message here said ``output``. Someone opening
+        the folder they were told about found it empty and concluded the run
+        had produced nothing.
+        """
+        base = self.root / "output"
+        if item is not None and item.is_saved and item.subfolder:
+            return base / item.subfolder
+        return base
+
     def open_folder(self) -> None:
-        folder = self.root / "output"
-        folder.mkdir(parents=True, exist_ok=True)
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
+        """Open the folder holding the last result, and say so if we cannot.
+
+        openUrl returns False when there is no file manager it can reach --
+        a bare window manager, a locked-down desktop, a sandbox with no portal
+        -- and that result used to be discarded, so the button did nothing and
+        nothing said why. A path on screen is worth more than a dead button.
+        """
+        folder = self.output_dir_for(self._last_saved)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.status.setText(f"Could not open {folder}: {exc}")
+            return
+
+        if QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder))):
+            return
+
+        # Qt could not hand it to a file manager. Try the platform's own opener
+        # before giving up: in a PyInstaller build Qt's own path is the one
+        # most likely to be missing.
+        opener = {"win32": ["explorer"], "darwin": ["open"]}.get(sys.platform, ["xdg-open"])
+        try:
+            subprocess.Popen([*opener, str(folder)],  # noqa: S603
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            pass
+
+        self.status.setText(
+            f"Could not open a file manager from here. Your files are in {folder}")
 
 
 def a_random_seed() -> int:
