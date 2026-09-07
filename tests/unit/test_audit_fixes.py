@@ -1025,38 +1025,47 @@ class TestTheFlagsWePassAreTheOnesComfyuiHas:
 
 class TestWhichSafeguardsAMachineGets:
     def test_rocm_gets_both(self, tmp_path):
-        from toolshed.exec.engine import stability_args
+        from toolshed.exec.engine import choose_safeguards
 
-        got = stability_args(_engine_tree(tmp_path), rocm=True)
-        assert [s.flag for s in got] == ["--disable-async-offload",
-                                         "--disable-pinned-memory"]
+        got = choose_safeguards(_engine_tree(tmp_path), rocm=True)
+        assert got.flags == ["--disable-async-offload", "--disable-pinned-memory"]
+        assert got.unavailable == ()
 
     def test_nvidia_gets_none(self, tmp_path):
-        from toolshed.exec.engine import stability_args
+        from toolshed.exec.engine import choose_safeguards
 
-        assert stability_args(_engine_tree(tmp_path), rocm=False) == []
+        got = choose_safeguards(_engine_tree(tmp_path), rocm=False)
+        assert got.flags == [] and got.unavailable == ()
 
     def test_the_user_taking_it_over_means_we_stand_aside(self, tmp_path):
         """Typing --async-offload in Extra options puts the default back, and
         we must not then argue with it by passing the opposite flag too."""
-        from toolshed.exec.engine import stability_args
+        from toolshed.exec.engine import choose_safeguards
 
-        got = stability_args(_engine_tree(tmp_path), rocm=True,
-                             extra=["--async-offload", "4"])
-        assert [s.flag for s in got] == ["--disable-pinned-memory"]
+        got = choose_safeguards(_engine_tree(tmp_path), rocm=True,
+                                extra=["--async-offload", "4"])
+        assert got.flags == ["--disable-pinned-memory"]
+        assert [s.flag for s in got.overridden] == ["--disable-async-offload"]
+        assert got.unavailable == (), "a deliberate choice is not a missing safeguard"
 
     def test_and_repeating_our_own_flag_is_not_doubled(self, tmp_path):
-        from toolshed.exec.engine import stability_args
+        from toolshed.exec.engine import choose_safeguards
 
-        got = stability_args(_engine_tree(tmp_path), rocm=True,
-                             extra=["--disable-pinned-memory"])
-        assert [s.flag for s in got] == ["--disable-async-offload"]
+        got = choose_safeguards(_engine_tree(tmp_path), rocm=True,
+                                extra=["--disable-pinned-memory"])
+        assert got.flags == ["--disable-async-offload"]
 
-    def test_an_engine_without_the_flags_gets_none_rather_than_a_bad_command(self, tmp_path):
-        from toolshed.exec.engine import stability_args
+    def test_an_engine_that_renamed_a_flag_reports_it_rather_than_dropping_it(self, tmp_path):
+        """The way this whole crash comes back: a future ComfyUI renames the
+        flag, we quietly stop passing it, and long jobs start dying again with
+        nothing anywhere saying why."""
+        from toolshed.exec.engine import choose_safeguards
 
         engine = _engine_tree(tmp_path, 'parser.add_argument("--listen")\n')
-        assert stability_args(engine, rocm=True) == []
+        got = choose_safeguards(engine, rocm=True)
+        assert got.flags == [], "an unknown flag would stop ComfyUI starting at all"
+        assert [s.flag for s in got.unavailable] == ["--disable-async-offload",
+                                                     "--disable-pinned-memory"]
 
 
 class TestTheSafeguardsReachTheCommandLine:
@@ -1144,3 +1153,80 @@ class TestTheLauncherKnowsItIsOnRocm:
             assert "--disable-async-offload" in said and "swapped out" in said
         finally:
             page.worker.wait(5000)
+
+
+class TestAMissingSafeguardIsSaidOutLoud:
+    """The way this crash returns: a future ComfyUI renames a flag, the
+    launcher quietly stops passing it, and long jobs die again with nothing
+    anywhere connecting the two."""
+
+    def test_the_launcher_warns_instead_of_starting_quietly(self, qapp, tmp_path, monkeypatch):
+        from PySide6 import QtCore
+
+        import toolshed.ui.launch as launch_module
+        from toolshed.exec.manifest import Manifest
+        from toolshed.ui.launch import LaunchPage
+
+        _engine_tree(tmp_path, 'parser.add_argument("--listen")\n')   # flags renamed away
+        Manifest(data_root=tmp_path,
+                 torch_index="https://download.pytorch.org/whl/rocm7.2").save()
+
+        class StubWorker(QtCore.QThread):
+            line = QtCore.Signal(str)
+            ready = QtCore.Signal(str)
+            failed = QtCore.Signal(str, str)
+            died = QtCore.Signal(str)
+
+            def __init__(self, engine):
+                super().__init__()
+                self.engine = engine
+
+            def run(self):
+                pass
+
+        monkeypatch.setattr(launch_module, "EngineWorker", StubWorker)
+        page = LaunchPage(tmp_path)
+        page.start_engine()
+        try:
+            assert page.engine.safe_args == [], "an unknown flag stops ComfyUI starting"
+            said = page.log.toPlainText()
+            assert "--disable-async-offload" in said and "--disable-pinned-memory" in said
+            assert "Warning" in said and "first thing to suspect" in said
+        finally:
+            page.worker.wait(5000)
+
+
+class TestTheLogSaysWhichCrashItWas:
+    """An exit code says the process aborted. Only the log says why, and the
+    user should not have to send two hundred lines to someone who can read it."""
+
+    def test_the_fault_from_the_real_log_is_recognised(self):
+        from toolshed.exec.engine import explain_crash
+
+        said = explain_crash(
+            "Requested to load WanVAE\n"
+            "Memory access fault by GPU node-1 (Agent handle: 0x1f768820) on address "
+            "0x7f1396928000. Reason: Page not present or supervisor privilege.\n"
+            "Fatal Python error: Aborted\n")
+        assert said and "graphics memory fault" in said
+        assert "--disable-dynamic-vram" in said, "no next step offered"
+
+    def test_an_ordinary_log_is_not_explained_away(self):
+        from toolshed.exec.engine import explain_crash
+
+        assert explain_crash("Prompt executed in 12.3 seconds\n") is None
+
+    def test_the_engine_prefers_the_log_to_the_exit_code(self, tmp_path):
+        from toolshed.exec.engine import Engine
+
+        engine = Engine(root=tmp_path)
+        engine._log.append("Memory access fault by GPU node-1 on address 0x7f13")
+        assert "graphics memory fault" in engine._explain_exit(-6)
+
+    def test_without_that_the_exit_code_still_speaks(self, tmp_path):
+        from toolshed.exec.engine import Engine
+
+        engine = Engine(root=tmp_path)
+        engine._log.append("Prompt executed in 12.3 seconds")
+        assert "graphics driver" in engine._explain_exit(-6)
+        assert engine._explain_exit(0) == "ComfyUI closed on its own."

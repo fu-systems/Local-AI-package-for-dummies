@@ -24,9 +24,9 @@ from toolshed.exec.engine import (
     Engine,
     EngineError,
     Layout,
+    choose_safeguards,
     open_in_browser,
     read_extra_flags,
-    stability_args,
     write_extra_flags,
 )
 
@@ -217,19 +217,28 @@ class LaunchPage(QtWidgets.QWidget):
             # engine too, or the card the install proved usable is not used.
             env = dict(manifest.torch_env)
 
-        guards = stability_args(Layout(self.root).engine_dir,
-                                rocm=self._on_rocm(manifest), extra=extra)
-        if guards:
-            flags = " and ".join(g.flag for g in guards)
-            reasons = "; ".join(g.plain_english for g in guards)
+        guards = choose_safeguards(Layout(self.root).engine_dir,
+                                   rocm=self._on_rocm(manifest), extra=extra)
+        if guards.applied:
+            flags = " and ".join(g.flag for g in guards.applied)
+            reasons = "; ".join(g.plain_english for g in guards.applied)
             self.log.appendPlainText(
-                f"Starting with {flags}. That switches off {reasons}. Both have "
+                f"Starting with {flags}. That switches off {reasons}. These have "
                 f"crashed the engine on AMD cards at the moment a large model is "
                 f"swapped out, after the work was already done. Changing model "
                 f"takes a little longer this way; generating is not affected.")
+        for guard in guards.unavailable:
+            # Never silent. A safeguard we meant to apply and could not is the
+            # original crash coming back, and the one thing the user must not
+            # have to discover by losing another hour to it.
+            self.log.appendPlainText(
+                f"Warning: this version of ComfyUI does not accept {guard.flag}, "
+                f"so {guard.plain_english} stays switched on. That has crashed "
+                f"AMD cards at the moment a large model is swapped out. If a long "
+                f"job dies partway through, this is the first thing to suspect.")
 
         self.engine = Engine(root=self.root, env=env, extra_args=extra,
-                             safe_args=[g.flag for g in guards])
+                             safe_args=guards.flags)
         self.worker = EngineWorker(self.engine)
         self.worker.line.connect(self.log.appendPlainText)
         self.worker.ready.connect(self._on_ready)
