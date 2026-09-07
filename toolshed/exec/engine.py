@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -77,6 +77,82 @@ def choose_port(preferred: int = DEFAULT_PORT) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind((HOST, 0))
         return probe.getsockname()[1]
+
+
+@dataclass(frozen=True)
+class Safeguard:
+    """One ComfyUI default we turn off because it crashes this kind of machine.
+
+    ``concern`` is the substring that means the user has taken this decision
+    over in Extra ComfyUI options. Typing ``--async-offload`` there puts the
+    default back, and we then add nothing about it -- rather than trying to
+    out-argue argparse over which of a pair of opposing flags wins.
+    """
+
+    flag: str
+    concern: str
+    plain_english: str
+
+
+# ComfyUI turns on async weight offloading and pinned host memory by default.
+# Its own help text says async offload is "Enabled by default on Nvidia", but
+# a gfx1100 on ROCm 7.2 logs "Using async weight offloading with 2 streams" and
+# "Enabled pinned memory 14909" -- so it is on for AMD too, and the help is
+# describing an intention rather than the behaviour.
+#
+# Both move weights between the card and main memory by direct memory access,
+# and that is where this configuration dies. Twice, at the moment a large model
+# is swapped out to make room for a VAE:
+#
+#     Requested to load WanVAE
+#     Memory access fault by GPU node-1 ... on address 0x7f1396928000.
+#     Reason: Page not present or supervisor privilege.
+#
+# 0x7f… is a host address. A graphics card faulting on host memory means a
+# transfer was set up against pages that were not mapped for it. Both crashes
+# came after minutes of successful sampling, at the first model swap, which is
+# exactly when these two paths are used and never used before.
+#
+# Turning them off slows model swapping and nothing else -- sampling is
+# untouched. The trade is a few seconds per model change against losing seven
+# minutes of finished work to an abort.
+AMD_SAFEGUARDS = (
+    Safeguard("--disable-async-offload", "async-offload",
+              "moving model weights in the background while the card works"),
+    Safeguard("--disable-pinned-memory", "pinned-memory",
+              "reserving main memory the card can read from directly"),
+)
+
+
+def engine_understands(engine_dir: Path, flag: str) -> bool:
+    """Does the installed ComfyUI accept this option?
+
+    Read from its own ``cli_args.py`` as text. Passing an option ComfyUI does
+    not know makes argparse print usage and exit before the server starts, so
+    an unrecognised flag would turn "crashes at the end of a long job" into
+    "never starts at all" -- a worse failure, and one we cannot rehearse here
+    because we do not have the engine or the card.
+
+    Read, not imported: importing ComfyUI is the line this project does not
+    cross. Unreadable means no, so an engine laid out differently by a future
+    version gets the stock defaults rather than a broken command line.
+    """
+    try:
+        source = (engine_dir / "comfy" / "cli_args.py").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return f'"{flag}"' in source or f"'{flag}'" in source
+
+
+def stability_args(engine_dir: Path, *, rocm: bool,
+                   extra: Sequence[str] = ()) -> list[Safeguard]:
+    """The safeguards this machine needs, and that this engine understands."""
+    if not rocm:
+        return []
+    typed = " ".join(extra)
+    return [s for s in AMD_SAFEGUARDS
+            if s.concern not in typed and engine_understands(engine_dir, s.flag)]
 
 
 @dataclass(frozen=True)
@@ -150,6 +226,7 @@ class Engine:
     env: dict[str, str] = field(default_factory=dict)
     port: int = 0
     extra_args: list[str] = field(default_factory=list)
+    safe_args: list[str] = field(default_factory=list)
     process: subprocess.Popen | None = None
     _log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LINES_KEPT))
     _reader: threading.Thread | None = None
@@ -186,6 +263,10 @@ class Engine:
             "--port", str(self.port),
             "--disable-auto-launch",
             "--log-stdout",
+            # Defaults switched off because they crash this machine. Before the
+            # user's own options, not after, so anything they type still has
+            # the last word.
+            *self.safe_args,
             # Whatever the user added. Last, so it can override anything above
             # -- argparse takes the later value for a repeated option, which is
             # what makes this an escape hatch rather than a suggestion box.

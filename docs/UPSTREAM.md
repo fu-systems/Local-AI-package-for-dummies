@@ -48,6 +48,8 @@ Verified 2026-09-05 against ComfyUI v0.34.0 unless stated otherwise.
 | `uv pip install --no-index --offline --find-links <dir>` installs from wheel files on disk without touching the network; there is no `uv pip download` | uv 0.12.10 `uv pip --help`, `uv pip install --help`, live offline install | The wheels we download ourselves are handed to uv this way |
 | uv prints nothing while downloading when its output is a pipe: progress bars need a terminal, and its summary lines come only at phase boundaries | uv 0.12.10 observed on a live install | Why the graphics-card step looked hung for minutes, and why the download is now ours |
 | A simple-index page lists each file as an anchor whose text is the filename and whose href carries `#sha256=<hex>`; project names on it are normalised (`[-_.]+` → `-`, lowercased) | PEP 503; verified on PyPI live | Where the size and hash for each of uv's files come from |
+| The exact flags are `--disable-async-offload` ("Disable async weight offloading.") and `--disable-pinned-memory` ("Disable pinned memory use."); `--async-offload` takes an optional stream count and its help claims "Enabled by default on Nvidia" | `comfy/cli_args.py` at tag v0.34.0 | Passed on every ROCm launch; a misspelt flag makes argparse exit before the server starts |
+| That help text is wrong for AMD: a gfx1100 on ROCm 7.2 logs `Using async weight offloading with 2 streams` and `Enabled pinned memory 14909` with no flags given | reported install log, RX 7900 XT | The reason the safeguards are needed at all, and why reading the help alone would have missed it |
 
 ## Known upstream issues we route around
 

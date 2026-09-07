@@ -958,3 +958,189 @@ class TestTheGraphicsCardStepHasARealBar:
         monkeypatch.setattr(uvtool, "pip_install", fake_pip)
         runner._install_torch(step)
         assert calls[0] is not None and calls[1] is None
+
+
+# ---------------------------------------------------------------------------
+# The crash that ate seven minutes of work, twice
+
+
+# The shape of ComfyUI's own cli_args.py, quoted from v0.34.0. The help text
+# for async offload says Nvidia; the AMD install log says otherwise.
+CLI_ARGS_SOURCE = '''
+parser.add_argument("--async-offload", nargs="?", const=2, type=int,
+                    help="Use async weight offloading. An optional argument "
+                         "controls the amount of offload streams. Default is 2. "
+                         "Enabled by default on Nvidia.")
+parser.add_argument("--disable-async-offload", action="store_true",
+                    help="Disable async weight offloading.")
+parser.add_argument("--disable-pinned-memory", action="store_true",
+                    help="Disable pinned memory use.")
+parser.add_argument("--disable-dynamic-vram", action="store_true",
+                    help="Disable dynamic VRAM and use estimate based model loading.")
+'''
+
+
+def _engine_tree(root: Path, source: str = CLI_ARGS_SOURCE) -> Path:
+    engine = root / "engine" / "comfyui"
+    (engine / "comfy").mkdir(parents=True)
+    (engine / "comfy" / "cli_args.py").write_text(source, encoding="utf-8")
+    return engine
+
+
+class TestTheFlagsWePassAreTheOnesComfyuiHas:
+    """A flag ComfyUI does not know makes argparse exit before the server
+    starts. That turns "crashes at the end of a long job" into "never starts",
+    and we have no card here to rehearse it on."""
+
+    def test_the_exact_spellings(self):
+        from toolshed.exec.engine import AMD_SAFEGUARDS
+
+        assert [s.flag for s in AMD_SAFEGUARDS] == [
+            "--disable-async-offload", "--disable-pinned-memory"]
+
+    def test_a_flag_the_engine_declares_is_recognised(self, tmp_path):
+        from toolshed.exec.engine import engine_understands
+
+        engine = _engine_tree(tmp_path)
+        assert engine_understands(engine, "--disable-async-offload")
+        assert engine_understands(engine, "--disable-pinned-memory")
+
+    def test_one_it_does_not_is_not(self, tmp_path):
+        from toolshed.exec.engine import engine_understands
+
+        assert not engine_understands(_engine_tree(tmp_path), "--disable-warp-drive")
+
+    def test_a_mention_in_prose_is_not_a_flag(self, tmp_path):
+        """"see --disable-async-offload" in a comment must not count."""
+        from toolshed.exec.engine import engine_understands
+
+        engine = _engine_tree(tmp_path, "# renamed; was --disable-async-offload\n")
+        assert not engine_understands(engine, "--disable-async-offload")
+
+    def test_an_engine_that_is_not_there_yet_gets_nothing(self, tmp_path):
+        from toolshed.exec.engine import engine_understands
+
+        assert not engine_understands(tmp_path / "nope", "--disable-async-offload")
+
+
+class TestWhichSafeguardsAMachineGets:
+    def test_rocm_gets_both(self, tmp_path):
+        from toolshed.exec.engine import stability_args
+
+        got = stability_args(_engine_tree(tmp_path), rocm=True)
+        assert [s.flag for s in got] == ["--disable-async-offload",
+                                         "--disable-pinned-memory"]
+
+    def test_nvidia_gets_none(self, tmp_path):
+        from toolshed.exec.engine import stability_args
+
+        assert stability_args(_engine_tree(tmp_path), rocm=False) == []
+
+    def test_the_user_taking_it_over_means_we_stand_aside(self, tmp_path):
+        """Typing --async-offload in Extra options puts the default back, and
+        we must not then argue with it by passing the opposite flag too."""
+        from toolshed.exec.engine import stability_args
+
+        got = stability_args(_engine_tree(tmp_path), rocm=True,
+                             extra=["--async-offload", "4"])
+        assert [s.flag for s in got] == ["--disable-pinned-memory"]
+
+    def test_and_repeating_our_own_flag_is_not_doubled(self, tmp_path):
+        from toolshed.exec.engine import stability_args
+
+        got = stability_args(_engine_tree(tmp_path), rocm=True,
+                             extra=["--disable-pinned-memory"])
+        assert [s.flag for s in got] == ["--disable-async-offload"]
+
+    def test_an_engine_without_the_flags_gets_none_rather_than_a_bad_command(self, tmp_path):
+        from toolshed.exec.engine import stability_args
+
+        engine = _engine_tree(tmp_path, 'parser.add_argument("--listen")\n')
+        assert stability_args(engine, rocm=True) == []
+
+
+class TestTheSafeguardsReachTheCommandLine:
+    def test_they_are_in_the_argv_before_the_users_own(self, tmp_path):
+        from toolshed.exec.engine import Engine
+
+        engine = Engine(root=tmp_path, port=8188,
+                        safe_args=["--disable-async-offload", "--disable-pinned-memory"],
+                        extra_args=["--reserve-vram", "2"])
+        argv = engine.command()
+        assert "--disable-async-offload" in argv and "--disable-pinned-memory" in argv
+        assert argv.index("--disable-pinned-memory") < argv.index("--reserve-vram"), \
+            "the user's options must still come last, so they keep the final word"
+
+    def test_a_machine_that_needs_none_gets_a_clean_command(self, tmp_path):
+        from toolshed.exec.engine import Engine
+
+        assert not [a for a in Engine(root=tmp_path).command() if a.startswith("--disable-")
+                    and a != "--disable-auto-launch"]
+
+
+class TestTheLauncherKnowsItIsOnRocm:
+    def test_from_the_index_the_installer_used(self, qapp, tmp_path):
+        from toolshed.exec.manifest import Manifest
+        from toolshed.ui.launch import LaunchPage
+
+        page = LaunchPage(tmp_path)
+        rocm = Manifest(data_root=tmp_path,
+                        torch_index="https://download.pytorch.org/whl/rocm7.2")
+        cuda = Manifest(data_root=tmp_path,
+                        torch_index="https://download.pytorch.org/whl/cu130")
+        assert page._on_rocm(rocm) is True
+        assert page._on_rocm(cuda) is False
+
+    def test_an_older_install_falls_back_to_the_machine(self, qapp, tmp_path, monkeypatch):
+        import importlib
+
+        from toolshed.exec.manifest import Manifest
+        from toolshed.ui.launch import LaunchPage
+
+        # `toolshed.hw` re-exports detect, so `import toolshed.hw.detect as x`
+        # binds the function, not the module. Ask for the module by name.
+        detect_module = importlib.import_module("toolshed.hw.detect")
+        monkeypatch.setattr(detect_module, "detect",
+                            lambda: HardwareReport(os="linux", gpus=(Gpu("amd", "RX 7900 XT"),)))
+        assert LaunchPage(tmp_path)._on_rocm(Manifest(data_root=tmp_path)) is True
+
+    def test_starting_the_engine_applies_them(self, qapp, tmp_path, monkeypatch):
+        """End to end from the button: an AMD install starts ComfyUI with both
+        defaults switched off, and says so in the log."""
+        from PySide6 import QtCore
+
+        import toolshed.ui.launch as launch_module
+        from toolshed.exec.manifest import Manifest
+        from toolshed.ui.launch import LaunchPage
+
+        _engine_tree(tmp_path)
+        Manifest(data_root=tmp_path,
+                 torch_index="https://download.pytorch.org/whl/rocm7.2",
+                 torch_env={"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}).save()
+
+        class StubWorker(QtCore.QThread):
+            line = QtCore.Signal(str)
+            ready = QtCore.Signal(str)
+            failed = QtCore.Signal(str, str)
+            died = QtCore.Signal(str)
+
+            def __init__(self, engine):
+                super().__init__()
+                self.engine = engine
+
+            def run(self):
+                pass
+
+        monkeypatch.setattr(launch_module, "StubWorker", StubWorker, raising=False)
+        monkeypatch.setattr(launch_module, "EngineWorker", StubWorker)
+        page = LaunchPage(tmp_path)
+        page.start_engine()
+        try:
+            assert page.engine is not None
+            assert page.engine.safe_args == ["--disable-async-offload",
+                                             "--disable-pinned-memory"]
+            assert page.engine.env == {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}
+            said = page.log.toPlainText()
+            assert "--disable-async-offload" in said and "swapped out" in said
+        finally:
+            page.worker.wait(5000)

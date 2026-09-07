@@ -26,6 +26,7 @@ from toolshed.exec.engine import (
     Layout,
     open_in_browser,
     read_extra_flags,
+    stability_args,
     write_extra_flags,
 )
 
@@ -204,17 +205,31 @@ class LaunchPage(QtWidgets.QWidget):
             open_in_browser(self.engine.url)
             return
 
+        from toolshed.exec.manifest import Manifest
+
         typed = self.flags.text().strip()
         write_extra_flags(self.root, typed)
+        extra = read_extra_flags(self.root)
+        manifest = Manifest.load(self.root)
         if env is None:
             # The environment the installer chose for PyTorch -- the AMD
             # HSA_OVERRIDE_GFX_VERSION for cards that need it -- must reach the
             # engine too, or the card the install proved usable is not used.
-            from toolshed.exec.manifest import Manifest
+            env = dict(manifest.torch_env)
 
-            env = dict(Manifest.load(self.root).torch_env)
-        self.engine = Engine(root=self.root, env=env,
-                             extra_args=read_extra_flags(self.root))
+        guards = stability_args(Layout(self.root).engine_dir,
+                                rocm=self._on_rocm(manifest), extra=extra)
+        if guards:
+            flags = " and ".join(g.flag for g in guards)
+            reasons = "; ".join(g.plain_english for g in guards)
+            self.log.appendPlainText(
+                f"Starting with {flags}. That switches off {reasons}. Both have "
+                f"crashed the engine on AMD cards at the moment a large model is "
+                f"swapped out, after the work was already done. Changing model "
+                f"takes a little longer this way; generating is not affected.")
+
+        self.engine = Engine(root=self.root, env=env, extra_args=extra,
+                             safe_args=[g.flag for g in guards])
         self.worker = EngineWorker(self.engine)
         self.worker.line.connect(self.log.appendPlainText)
         self.worker.ready.connect(self._on_ready)
@@ -229,6 +244,20 @@ class LaunchPage(QtWidgets.QWidget):
             "Starting ComfyUI. The first time takes a minute or two while it loads "
             "your graphics card and reads the models.")
         self.worker.start()
+
+    def _on_rocm(self, manifest) -> bool:
+        """Is this install driving an AMD card through ROCm?
+
+        The installer wrote down which PyTorch index it used, and that is the
+        exact question -- the safeguards are about the ROCm transfer path, not
+        about which cards happen to be plugged in. An install from before that
+        was recorded falls back to asking the machine.
+        """
+        if manifest.torch_index:
+            return "rocm" in manifest.torch_index.lower()
+        from toolshed.hw.detect import detect
+
+        return any(gpu.vendor == "amd" for gpu in detect().gpus)
 
     def _on_ready(self, url: str) -> None:
         self.bar.setVisible(False)
