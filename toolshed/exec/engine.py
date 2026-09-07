@@ -116,11 +116,40 @@ class Safeguard:
 # Turning them off slows model swapping and nothing else -- sampling is
 # untouched. The trade is a few seconds per model change against losing seven
 # minutes of finished work to an abort.
+# The two above were not enough. A machine that hit this at every attempt to
+# load the Wan VAE -- not twice in a long session, every single time -- sent us
+# back to model_management.py at v0.34.0, where the reason is visible:
+#
+# Dynamic VRAM is its own transfer path, and neither of the first two flags
+# switches it off. `enables_dynamic_vram()` in cli_args.py is true unless
+# --disable-dynamic-vram, --highvram, --gpu-only, --novram or --cpu is given,
+# so it survives both of ours. It then does this for every dynamic model, at
+# the point one is swapped:
+#
+#     pin_state[subset] = (comfy_aimdo.host_buffer.HostBuffer(
+#         0, 8 * 1024 * 1024, pinned_hostbuf_size(model.model_size())), ...)
+#
+# --disable-pinned-memory only drives pinned_hostbuf_size() to zero. The aimdo
+# host buffer is still constructed and the path is still live, which is why
+# turning off async offload and pinned memory made the fault rarer without
+# making it stop.
+#
+# So the third flag, which is the one that actually takes that path out:
+# "Disable dynamic VRAM and use estimate based model loading."
+#
+# The trade is real and worth stating. Estimate-based loading is the older,
+# blunter scheme, and it can misjudge a tight card where the dynamic one would
+# have coped -- so this may cost an out-of-memory on a job that used to fit.
+# An out-of-memory reports itself and leaves the machine usable. A page fault
+# aborts the process and takes the finished work with it. Given a card that
+# cannot load a VAE without dying, that trade is not close.
 AMD_SAFEGUARDS = (
     Safeguard("--disable-async-offload", "async-offload",
               "moving model weights in the background while the card works"),
     Safeguard("--disable-pinned-memory", "pinned-memory",
               "reserving main memory the card can read from directly"),
+    Safeguard("--disable-dynamic-vram", "dynamic-vram",
+              "streaming model weights between the card and main memory as it goes"),
 )
 
 
@@ -157,9 +186,10 @@ CRASH_SIGNS = (
     ("Memory access fault by GPU node",
      "ComfyUI hit a graphics memory fault and was stopped by the driver. "
      "That is not your workflow and not something you did, but the work in "
-     "progress is lost. Toolshed already starts AMD cards with the two "
-     "transfer options that usually cause it switched off. If this keeps "
-     "happening, add --disable-dynamic-vram to Extra ComfyUI options."),
+     "progress is lost. Toolshed already starts AMD cards with all three "
+     "transfer paths that cause it switched off. If this still happens, the "
+     "VAE is the usual place: add --cpu-vae to Extra ComfyUI options to run "
+     "that step on the processor instead. It is slower and it always works."),
 )
 
 

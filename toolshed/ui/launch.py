@@ -220,7 +220,11 @@ class LaunchPage(QtWidgets.QWidget):
         guards = choose_safeguards(Layout(self.root).engine_dir,
                                    rocm=self._on_rocm(manifest), extra=extra)
         if guards.applied:
-            flags = " and ".join(g.flag for g in guards.applied)
+            names = [g.flag for g in guards.applied]
+            # "a and b" reads fine; "a and b and c" does not, and there are
+            # three of these now.
+            flags = (" and ".join(names) if len(names) < 3
+                     else f"{', '.join(names[:-1])} and {names[-1]}")
             reasons = "; ".join(g.plain_english for g in guards.applied)
             self.log.appendPlainText(
                 f"Starting with {flags}. That switches off {reasons}. These have "

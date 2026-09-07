@@ -421,7 +421,7 @@ class TestTheEngineDyingWhileRunning:
             # fault rather than settle for "stopped by the graphics driver":
             # -6 covers every abort, and only the log says which one this was.
             assert "graphics memory fault" in deaths[0], deaths[0]
-            assert "--disable-dynamic-vram" in deaths[0], "no next step offered"
+            assert "--cpu-vae" in deaths[0], "no next step offered"
             assert not engine.is_running()
         finally:
             engine.stop()

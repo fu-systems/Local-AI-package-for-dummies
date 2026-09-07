@@ -1,5 +1,13 @@
 # Video sizes, and how to replace the guesses with measurements
 
+> **Two different video failures, and they are not the same bug.** If the log
+> says `Memory access fault by GPU node` — usually right after
+> `Requested to load WanVAE` — that is the AMD transfer-path fault, not this.
+> It is handled by the safeguards in `toolshed/exec/engine.py:AMD_SAFEGUARDS`,
+> and nothing on this page will help with it. This page is about the card
+> genuinely not having room for the decode.
+
+
 Every number in `catalog/video_presets.yaml` is a conservative estimate. This
 is how to turn them into measurements, which is a couple of hours on one
 machine and is worth doing before anyone else meets a card we guessed wrong
