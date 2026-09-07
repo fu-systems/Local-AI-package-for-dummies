@@ -265,13 +265,21 @@ def plan_install(
     Empty when uv would fetch nothing (everything is installed already) and
     also when the dry run fails or says something we do not recognise; the
     caller then installs the ordinary way and lets uv report its own error.
+
+    That includes uv not being runnable at all. This step exists only to put a
+    progress bar on a download -- it is not the install, and it must not be
+    the thing that decides an install is impossible. Whatever is really wrong
+    surfaces from the install itself, where the message means something.
     """
     cmd: list[str | Path] = [uv, "pip", "install", "--dry-run", "-v",
                              "--python", venv_python(runtime_dir)]
     if index_url:
         cmd += ["--index-url", index_url]
     cmd += packages
-    result = run(cmd, env=uv_env(runtime_dir), timeout=600, should_cancel=should_cancel)
+    try:
+        result = run(cmd, env=uv_env(runtime_dir), timeout=600, should_cancel=should_cancel)
+    except OSError:
+        return []
     if not result.ok:
         return []
     return parse_selected(result.stdout)

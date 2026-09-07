@@ -38,6 +38,8 @@ from toolshed.planner.plan import PENDING, Download, InstallPlan, Kind, Step
 from toolshed.planner.torchsel import choose_torch
 
 MODEL = b"model-weights" * 5000
+# Never a bare "uv": a machine with one installed would run it for real.
+FAKE_UV = Path("/nonexistent/toolshed-test/uv")
 ENGINE_TAG = "v0.34.0"
 
 
@@ -247,7 +249,7 @@ class TestTheWorkspaceStep:
 
         monkeypatch.setattr(uvtool, "venv_python_version", lambda _r: existing_version)
         monkeypatch.setattr(uvtool, "create_venv", fake_create)
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
         if venv_exists:
             (runner.runtime / "venv").mkdir(parents=True, exist_ok=True)
 
@@ -299,7 +301,7 @@ class TestTheWorkspaceStep:
 
         monkeypatch.setattr(uvtool, "venv_python_version", lambda _r: None)
         monkeypatch.setattr(uvtool, "create_venv", fake_create)
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
 
         with pytest.raises(InstallFailed) as exc:
             runner._create_venv(Step(Kind.CREATE_VENV, "Making a private workspace"))
@@ -325,8 +327,8 @@ class TestUvFlags:
         import toolshed.exec.uvtool as mod
         original, mod.run = mod.run, fake_run
         try:
-            mod.create_venv(Path("uv"), tmp_path, "3.12")
-            mod.create_venv(Path("uv"), tmp_path, "3.12", clear=True)
+            mod.create_venv(FAKE_UV, tmp_path, "3.12")
+            mod.create_venv(FAKE_UV, tmp_path, "3.12", clear=True)
         finally:
             mod.run = original
 

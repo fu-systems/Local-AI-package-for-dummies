@@ -38,6 +38,12 @@ AMD_NEEDS_OVERRIDE = HardwareReport(
     os="linux", gpus=(Gpu("amd", "RX 6700 XT", 12288, gfx="gfx1031"),))
 
 
+# A uv that cannot exist. A bare "uv" would be found on the PATH of any
+# machine that happens to have one installed, and a test that quietly runs the
+# real tool passes for a reason the CI runner does not share.
+FAKE_UV = Path("/nonexistent/toolshed-test/uv")
+
+
 def _ok_result(stdout: str = "") -> proc.Result:
     return proc.Result(0, stdout, "")
 
@@ -80,9 +86,9 @@ class TestStopWorksDuringASubprocess:
 
         monkeypatch.setattr(uvtool, "run", fake_run)
         check = lambda: False  # noqa: E731
-        uvtool.install_python(Path("uv"), tmp_path, "3.12", should_cancel=check)
-        uvtool.create_venv(Path("uv"), tmp_path, "3.12", should_cancel=check)
-        uvtool.pip_install(Path("uv"), tmp_path, ["torch"], should_cancel=check)
+        uvtool.install_python(FAKE_UV, tmp_path, "3.12", should_cancel=check)
+        uvtool.create_venv(FAKE_UV, tmp_path, "3.12", should_cancel=check)
+        uvtool.pip_install(FAKE_UV, tmp_path, ["torch"], should_cancel=check)
         uvtool.verify_torch(tmp_path, "+rocm7.2", should_cancel=check)
         assert seen == [check] * 4
 
@@ -135,7 +141,7 @@ class TestUvStaysInsideTheDataRoot:
         seen = []
         monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: (seen.append([str(c) for c in cmd]),
                                                               _ok_result())[1])
-        uvtool.install_python(Path("uv"), tmp_path, "3.12")
+        uvtool.install_python(FAKE_UV, tmp_path, "3.12")
         assert "--no-bin" in seen[0], "uv python install writes a shim to ~/.local/bin without it"
         assert seen[0].index("--no-bin") < seen[0].index("3.12")
 
@@ -177,7 +183,8 @@ class TestTheHsaOverrideReachesEveryProbe:
         expected = torch_steps[0].payload["env"]
 
         probed = {}
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [])
         monkeypatch.setattr(uvtool, "pip_install", lambda *a, **kw: _ok_result())
 
         def fake_verify(runtime, tag, *, env=None, log=None, should_cancel=None):
@@ -661,7 +668,7 @@ class TestASilentDownloadIsNotMistakenForAHang:
         monkeypatch.setattr(uvtool, "run",
                             lambda cmd, **kw: (seen.update(kw), _ok_result())[1])
         beat = lambda: True  # noqa: E731
-        uvtool.pip_install(Path("uv"), tmp_path, ["torch"], heartbeat=beat)
+        uvtool.pip_install(FAKE_UV, tmp_path, ["torch"], heartbeat=beat)
         assert seen["heartbeat"] is beat
 
     def test_the_cache_growing_is_reported_as_bytes_received(self, tmp_path, monkeypatch):
@@ -681,7 +688,8 @@ class TestASilentDownloadIsNotMistakenForAHang:
             assert heartbeat() is True, "5 MB arrived and was not noticed"
             return _ok_result()
 
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [])
         monkeypatch.setattr(uvtool, "pip_install", fake_pip)
         runner._install_torch(install)
 
@@ -692,7 +700,8 @@ class TestASilentDownloadIsNotMistakenForAHang:
         plan = build_plan(AMD_NEEDS_OVERRIDE, [], tmp_path)
         install = next(s for s in plan.steps if s.kind == Kind.INSTALL_TORCH)
         runner = Runner(InstallPlan((install,), plan.torch, tmp_path, ()))
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
+        monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [])
         monkeypatch.setattr(uvtool, "pip_install",
                             lambda *a, **kw: proc.Result(-1, "", "uv showed no sign of progress"))
         with pytest.raises(InstallFailed) as exc:
@@ -792,14 +801,14 @@ class TestAskingUvWhatItWillFetch:
         seen = {}
         monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: (
             seen.update(cmd=[str(c) for c in cmd]), _ok_result(UV_DRY_RUN))[1])
-        files = uvtool.plan_install(Path("uv"), tmp_path, ["torch"], index_url="https://i/whl")
+        files = uvtool.plan_install(FAKE_UV, tmp_path, ["torch"], index_url="https://i/whl")
         assert "--dry-run" in seen["cmd"] and "-v" in seen["cmd"]
         assert seen["cmd"][seen["cmd"].index("--index-url") + 1] == "https://i/whl"
         assert [f.name for f in files] == ["six", "attrs"]
 
     def test_a_failed_dry_run_is_an_empty_list_not_a_crash(self, tmp_path, monkeypatch):
         monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: proc.Result(1, "", "boom"))
-        assert uvtool.plan_install(Path("uv"), tmp_path, ["torch"]) == []
+        assert uvtool.plan_install(FAKE_UV, tmp_path, ["torch"]) == []
 
 
 class TestLookingTheFilesUpOnTheIndex:
@@ -834,7 +843,7 @@ class TestUvInstallsFromWhatWeDownloaded:
         seen = {}
         monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: (
             seen.update(cmd=[str(c) for c in cmd]), _ok_result())[1])
-        uvtool.pip_install(Path("uv"), tmp_path, ["torch"], index_url="https://i/whl",
+        uvtool.pip_install(FAKE_UV, tmp_path, ["torch"], index_url="https://i/whl",
                            find_links=tmp_path / "wheels")
         cmd = seen["cmd"]
         assert "--no-index" in cmd and "--offline" in cmd
@@ -845,7 +854,7 @@ class TestUvInstallsFromWhatWeDownloaded:
         seen = {}
         monkeypatch.setattr(uvtool, "run", lambda cmd, **kw: (
             seen.update(cmd=[str(c) for c in cmd]), _ok_result())[1])
-        uvtool.pip_install(Path("uv"), tmp_path, ["torch"], index_url="https://i/whl")
+        uvtool.pip_install(FAKE_UV, tmp_path, ["torch"], index_url="https://i/whl")
         assert "--index-url" in seen["cmd"] and "--no-index" not in seen["cmd"]
 
 
@@ -866,7 +875,7 @@ class TestTheGraphicsCardStepHasARealBar:
         runner, step = self._runner(tmp_path, events)
         installed = {}
 
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
         monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
             uvtool.WheelFile("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl")])
         real_locate = uvtool.locate
@@ -898,7 +907,7 @@ class TestTheGraphicsCardStepHasARealBar:
         events = []
         runner, step = self._runner(tmp_path, events)
         runner.attempts = 1
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
         monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
             uvtool.WheelFile("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl")])
         monkeypatch.setattr(uvtool, "locate", lambda files, index, **kw: [
@@ -915,7 +924,7 @@ class TestTheGraphicsCardStepHasARealBar:
         events = []
         runner, step = self._runner(tmp_path, events)
         seen = {}
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
         monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
             uvtool.WheelFile("torch", "2.14.0+rocm7.2", "torch-2.14.0+rocm7.2-cp312-cp312-x.whl")])
         monkeypatch.setattr(uvtool, "locate", lambda files, index, **kw: list(files))  # no url
@@ -932,7 +941,7 @@ class TestTheGraphicsCardStepHasARealBar:
         events = []
         runner, step = self._runner(tmp_path, events)
         calls = []
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
         monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [])
         monkeypatch.setattr(uvtool, "locate", lambda *a, **kw: pytest.fail("nothing to look up"))
         monkeypatch.setattr(uvtool, "pip_install",
@@ -944,7 +953,7 @@ class TestTheGraphicsCardStepHasARealBar:
         events = []
         runner, step = self._runner(tmp_path, events)
         calls = []
-        monkeypatch.setattr(uvtool, "uv_path", lambda _r: Path("uv"))
+        monkeypatch.setattr(uvtool, "uv_path", lambda _r: FAKE_UV)
         monkeypatch.setattr(uvtool, "plan_install", lambda *a, **kw: [
             uvtool.WheelFile("six", "1.17.0", "six-1.17.0-py2.py3-none-any.whl")])
         real_locate = uvtool.locate
@@ -1230,3 +1239,29 @@ class TestTheLogSaysWhichCrashItWas:
         engine._log.append("Prompt executed in 12.3 seconds")
         assert "graphics driver" in engine._explain_exit(-6)
         assert engine._explain_exit(0) == "ComfyUI closed on its own."
+
+
+class TestTheShoppingListIsOnlyAnOptimisation:
+    """Asking uv what it would fetch exists to put a progress bar on a
+    download. It is not the install, and it must never be the thing that
+    decides an install is impossible -- CI found this by having no uv on its
+    PATH where the machine it was written on did."""
+
+    def test_a_uv_that_cannot_be_run_is_an_empty_list_not_a_crash(self, tmp_path):
+        got = uvtool.plan_install(Path("/nonexistent/toolshed-test/uv"), tmp_path, ["torch"])
+        assert got == []
+
+    def test_and_the_install_still_happens_the_ordinary_way(self, tmp_path, monkeypatch):
+        plan = build_plan(AMD_NEEDS_OVERRIDE, [], tmp_path)
+        install = next(s for s in plan.steps if s.kind == Kind.INSTALL_TORCH)
+        runner = Runner(InstallPlan((install,), plan.torch, tmp_path, ()))
+        seen = {}
+
+        monkeypatch.setattr(uvtool, "uv_path",
+                            lambda _r: Path("/nonexistent/toolshed-test/uv"))
+        monkeypatch.setattr(uvtool, "locate",
+                            lambda *a, **kw: pytest.fail("nothing was planned to look up"))
+        monkeypatch.setattr(uvtool, "pip_install",
+                            lambda *a, **kw: (seen.update(kw), _ok_result())[1])
+        runner._install_torch(install)
+        assert seen["find_links"] is None, "uv must fetch for itself when we could not plan"
