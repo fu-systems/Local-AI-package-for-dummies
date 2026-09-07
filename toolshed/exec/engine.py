@@ -362,6 +362,39 @@ class Engine:
             *self.extra_args,
         ]
 
+    def environment(self) -> dict[str, str]:
+        """The exact environment the engine runs in. Pure, like ``command``.
+
+        Inherits the user's, minus the frozen app's own loader paths, with ours
+        laid over it. Ours carries HSA_OVERRIDE_GFX_VERSION for the AMD cards
+        that need it; dropping it does not fail loudly, it just means the
+        engine cannot use the GPU.
+        """
+        env = child_environment(self.env)
+        # Unbuffered, or the log stays empty for a minute and the user watches
+        # a blank box while the engine is in fact starting normally.
+        env["PYTHONUNBUFFERED"] = "1"
+
+        # Let PyTorch grow its allocations instead of stranding memory it has
+        # reserved and cannot reuse. From a real out-of-memory on a 20 GB
+        # gfx1100, three minutes into a 3D job:
+        #
+        #     Tried to allocate 1.05 GiB. GPU 0 has a total capacity of
+        #     19.98 GiB of which 922.00 MiB is free. Of the allocated memory
+        #     15.09 GiB is allocated by PyTorch, and 3.19 GiB is reserved by
+        #     PyTorch but unallocated.
+        #
+        # 3.19 GB reserved and unusable against a 1.05 GB request: the card had
+        # the room three times over and could not offer it in one piece. That
+        # is fragmentation, and expandable segments is PyTorch's own answer to
+        # it -- recommended in the text of that very error, by this ROCm build.
+        #
+        # setdefault, not assignment: someone who has set this deliberately,
+        # here or in their shell, has thought about it more recently than we
+        # have.
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        return env
+
     # -- lifecycle ----------------------------------------------------------
 
     def start(self, *, on_line: LogFn | None = None,
@@ -407,14 +440,7 @@ class Engine:
         if not self.port:
             self.port = choose_port()
 
-        # Inherit the user's environment, minus the frozen app's own loader
-        # paths, with ours laid over it. Ours carries HSA_OVERRIDE_GFX_VERSION
-        # for the AMD cards that need it; dropping it does not fail loudly, it
-        # just means the engine cannot use the GPU.
-        environment = child_environment(self.env)
-        # Unbuffered, or the log stays empty for a minute and the user watches
-        # a blank box while the engine is in fact starting normally.
-        environment["PYTHONUNBUFFERED"] = "1"
+        environment = self.environment()
 
         self.process = subprocess.Popen(  # noqa: S603 -- argv is ours, no shell
             self.command(),

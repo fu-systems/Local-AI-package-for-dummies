@@ -203,7 +203,12 @@ class TestTalkingToTheEngine:
             client.run({})
         assert exc.value.reason_key == "execution_error"
         assert "ran out of memory" in str(exc.value)
-        assert "smaller size" in str(exc.value)
+        # The node, because "try a smaller size" means nothing when the step
+        # that ran out was a 3D shape decoder, and a next step that applies
+        # whatever the workflow was.
+        assert "KSampler" in str(exc.value)
+        assert "smaller" in str(exc.value)
+        assert "--disable-smart-memory" in str(exc.value)
 
     def test_cancelling_stops_waiting(self, engine, monkeypatch):
         client = ComfyClient(base_url=engine.url)

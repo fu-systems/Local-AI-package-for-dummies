@@ -449,6 +449,15 @@ def _explain_execution_error(data: dict) -> str:
     node = data.get("node_type") or data.get("node_id") or "a step"
     message = (data.get("exception_message") or "").strip()
     if "out of memory" in message.lower():
-        return ("Your graphics card ran out of memory. Try a smaller size, or "
-                "close other programs using the card.")
+        # "Try a smaller size" is good advice for a picture and useless for a
+        # 3D model, where nothing on screen is a size and the run has already
+        # cost three minutes. Say which step ran out, and give a step that
+        # applies: a workflow chaining six models keeps them all on the card,
+        # and that is the memory the next one cannot have.
+        return (f"Your graphics card ran out of memory at {node}. "
+                "If this is a picture or a video, ask for a smaller one. "
+                "Otherwise the workflow is holding several models on the card "
+                "at once: add --disable-smart-memory to Extra ComfyUI options, "
+                "which makes it put each one back when it is done. That is "
+                "slower and it fits in far less memory.")
     return f"{node} failed: {message}" if message else f"{node} failed."

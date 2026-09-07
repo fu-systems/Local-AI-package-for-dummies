@@ -1112,6 +1112,34 @@ class TestTheSafeguardsReachTheCommandLine:
                     and a != "--disable-auto-launch"]
 
 
+class TestTheAllocatorIsToldNotToStrandMemory:
+    """A 20 GB card refused a 1.05 GB allocation with 3.19 GB reserved and
+    unusable. The card had the room three times over and could not offer it in
+    one piece; PyTorch's own error text recommends the setting below."""
+
+    def test_expandable_segments_is_on_by_default(self, tmp_path):
+        from toolshed.exec.engine import Engine
+
+        env = Engine(root=tmp_path).environment()
+        assert env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+
+    def test_a_deliberate_setting_is_left_alone(self, tmp_path, monkeypatch):
+        """Someone who set this has thought about it more recently than we did."""
+        from toolshed.exec.engine import Engine
+
+        monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
+        env = Engine(root=tmp_path).environment()
+        assert env["PYTORCH_CUDA_ALLOC_CONF"] == "max_split_size_mb:128"
+
+    def test_the_amd_gfx_override_still_reaches_the_engine(self, tmp_path):
+        """The one variable that silently costs the whole GPU if it is lost."""
+        from toolshed.exec.engine import Engine
+
+        env = Engine(root=tmp_path, env={"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}).environment()
+        assert env["HSA_OVERRIDE_GFX_VERSION"] == "11.0.0"
+        assert env["PYTHONUNBUFFERED"] == "1"
+
+
 class TestTheLauncherKnowsItIsOnRocm:
     def test_from_the_index_the_installer_used(self, qapp, tmp_path):
         from toolshed.exec.manifest import Manifest

@@ -77,4 +77,16 @@ packs:
     default_checked: false
     # Nobody has published a working result for this on AMD. The setup smoke
     # test decides per machine; see docs/PLAN.md section 10.
+    #
+    # MEASURED, and the floor above is now known to be wrong: on a 20 GB
+    # gfx1100 this ran for three minutes and died out of memory in
+    # VaeDecodeShapeTrellis, with six models resident on the card at once
+    # (BiRefNet, MoGe, DINOv3, NAF, Trellis2, ShapeVae -- 15.09 GB allocated,
+    # 3.19 GB reserved but fragmented). 10 GB cannot be right when 20 GB is
+    # not enough.
+    #
+    # Deliberately not raised yet: that run predates both the allocator
+    # setting in engine.py and --disable-smart-memory, either of which may
+    # bring it back inside 20 GB. Re-measure with those before picking a
+    # number, and do not guess one in the meantime.
     experimental_on: [amd]
