@@ -1205,6 +1205,9 @@ class TestTheLauncherKnowsItIsOnRocm:
             assert page.engine.env == {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}
             said = page.log.toPlainText()
             assert "--disable-async-offload" in said and "swapped out" in said
+            # ComfyUI's error report prints argv but never the environment, so
+            # a log without this cannot be told from one where it was off.
+            assert "expandable_segments:True" in said
         finally:
             page.worker.wait(5000)
 
