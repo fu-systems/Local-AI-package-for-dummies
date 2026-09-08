@@ -220,7 +220,11 @@ class LaunchPage(QtWidgets.QWidget):
         guards = choose_safeguards(Layout(self.root).engine_dir,
                                    rocm=self._on_rocm(manifest), extra=extra)
         if guards.applied:
-            flags = " and ".join(g.flag for g in guards.applied)
+            names = [g.flag for g in guards.applied]
+            # "a and b" reads fine; "a and b and c" does not, and there are
+            # three of these now.
+            flags = (" and ".join(names) if len(names) < 3
+                     else f"{', '.join(names[:-1])} and {names[-1]}")
             reasons = "; ".join(g.plain_english for g in guards.applied)
             self.log.appendPlainText(
                 f"Starting with {flags}. That switches off {reasons}. These have "
@@ -239,6 +243,15 @@ class LaunchPage(QtWidgets.QWidget):
 
         self.engine = Engine(root=self.root, env=env, extra_args=extra,
                              safe_args=guards.flags)
+
+        # Say the memory setting out loud. ComfyUI's own error report prints
+        # the command line but not the environment, so when someone sends a
+        # log there is otherwise no way to tell whether this was on -- which
+        # cost a round of "that is the old build" on the one crash it exists
+        # to fix.
+        alloc = self.engine.environment().get("PYTORCH_CUDA_ALLOC_CONF")
+        if alloc:
+            self.log.appendPlainText(f"Memory: PYTORCH_CUDA_ALLOC_CONF={alloc}")
         self.worker = EngineWorker(self.engine)
         self.worker.line.connect(self.log.appendPlainText)
         self.worker.ready.connect(self._on_ready)

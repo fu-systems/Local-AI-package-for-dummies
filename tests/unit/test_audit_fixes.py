@@ -1005,7 +1005,8 @@ class TestTheFlagsWePassAreTheOnesComfyuiHas:
         from toolshed.exec.engine import AMD_SAFEGUARDS
 
         assert [s.flag for s in AMD_SAFEGUARDS] == [
-            "--disable-async-offload", "--disable-pinned-memory"]
+            "--disable-async-offload", "--disable-pinned-memory",
+            "--disable-dynamic-vram"]
 
     def test_a_flag_the_engine_declares_is_recognised(self, tmp_path):
         from toolshed.exec.engine import engine_understands
@@ -1033,11 +1034,14 @@ class TestTheFlagsWePassAreTheOnesComfyuiHas:
 
 
 class TestWhichSafeguardsAMachineGets:
-    def test_rocm_gets_both(self, tmp_path):
+    def test_rocm_gets_all_three(self, tmp_path):
+        """Three, not two. The first two left dynamic VRAM's own transfer path
+        running, and that is what was still faulting at every VAE load."""
         from toolshed.exec.engine import choose_safeguards
 
         got = choose_safeguards(_engine_tree(tmp_path), rocm=True)
-        assert got.flags == ["--disable-async-offload", "--disable-pinned-memory"]
+        assert got.flags == ["--disable-async-offload", "--disable-pinned-memory",
+                             "--disable-dynamic-vram"]
         assert got.unavailable == ()
 
     def test_nvidia_gets_none(self, tmp_path):
@@ -1053,7 +1057,7 @@ class TestWhichSafeguardsAMachineGets:
 
         got = choose_safeguards(_engine_tree(tmp_path), rocm=True,
                                 extra=["--async-offload", "4"])
-        assert got.flags == ["--disable-pinned-memory"]
+        assert got.flags == ["--disable-pinned-memory", "--disable-dynamic-vram"]
         assert [s.flag for s in got.overridden] == ["--disable-async-offload"]
         assert got.unavailable == (), "a deliberate choice is not a missing safeguard"
 
@@ -1062,7 +1066,18 @@ class TestWhichSafeguardsAMachineGets:
 
         got = choose_safeguards(_engine_tree(tmp_path), rocm=True,
                                 extra=["--disable-pinned-memory"])
-        assert got.flags == ["--disable-async-offload"]
+        assert got.flags == ["--disable-async-offload", "--disable-dynamic-vram"]
+
+    def test_asking_for_dynamic_vram_back_is_respected(self, tmp_path):
+        """--enable-dynamic-vram is somebody deciding they want it, perhaps to
+        see whether a newer ComfyUI fixed the fault. We do not argue."""
+        from toolshed.exec.engine import choose_safeguards
+
+        got = choose_safeguards(_engine_tree(tmp_path), rocm=True,
+                                extra=["--enable-dynamic-vram"])
+        assert "--disable-dynamic-vram" not in got.flags
+        assert [s.flag for s in got.overridden] == ["--disable-dynamic-vram"]
+        assert got.unavailable == (), "a deliberate choice is not a missing safeguard"
 
     def test_an_engine_that_renamed_a_flag_reports_it_rather_than_dropping_it(self, tmp_path):
         """The way this whole crash comes back: a future ComfyUI renames the
@@ -1074,7 +1089,8 @@ class TestWhichSafeguardsAMachineGets:
         got = choose_safeguards(engine, rocm=True)
         assert got.flags == [], "an unknown flag would stop ComfyUI starting at all"
         assert [s.flag for s in got.unavailable] == ["--disable-async-offload",
-                                                     "--disable-pinned-memory"]
+                                                     "--disable-pinned-memory",
+                                                     "--disable-dynamic-vram"]
 
 
 class TestTheSafeguardsReachTheCommandLine:
@@ -1094,6 +1110,34 @@ class TestTheSafeguardsReachTheCommandLine:
 
         assert not [a for a in Engine(root=tmp_path).command() if a.startswith("--disable-")
                     and a != "--disable-auto-launch"]
+
+
+class TestTheAllocatorIsToldNotToStrandMemory:
+    """A 20 GB card refused a 1.05 GB allocation with 3.19 GB reserved and
+    unusable. The card had the room three times over and could not offer it in
+    one piece; PyTorch's own error text recommends the setting below."""
+
+    def test_expandable_segments_is_on_by_default(self, tmp_path):
+        from toolshed.exec.engine import Engine
+
+        env = Engine(root=tmp_path).environment()
+        assert env["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+
+    def test_a_deliberate_setting_is_left_alone(self, tmp_path, monkeypatch):
+        """Someone who set this has thought about it more recently than we did."""
+        from toolshed.exec.engine import Engine
+
+        monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
+        env = Engine(root=tmp_path).environment()
+        assert env["PYTORCH_CUDA_ALLOC_CONF"] == "max_split_size_mb:128"
+
+    def test_the_amd_gfx_override_still_reaches_the_engine(self, tmp_path):
+        """The one variable that silently costs the whole GPU if it is lost."""
+        from toolshed.exec.engine import Engine
+
+        env = Engine(root=tmp_path, env={"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}).environment()
+        assert env["HSA_OVERRIDE_GFX_VERSION"] == "11.0.0"
+        assert env["PYTHONUNBUFFERED"] == "1"
 
 
 class TestTheLauncherKnowsItIsOnRocm:
@@ -1156,10 +1200,14 @@ class TestTheLauncherKnowsItIsOnRocm:
         try:
             assert page.engine is not None
             assert page.engine.safe_args == ["--disable-async-offload",
-                                             "--disable-pinned-memory"]
+                                             "--disable-pinned-memory",
+                                             "--disable-dynamic-vram"]
             assert page.engine.env == {"HSA_OVERRIDE_GFX_VERSION": "11.0.0"}
             said = page.log.toPlainText()
             assert "--disable-async-offload" in said and "swapped out" in said
+            # ComfyUI's error report prints argv but never the environment, so
+            # a log without this cannot be told from one where it was off.
+            assert "expandable_segments:True" in said
         finally:
             page.worker.wait(5000)
 
@@ -1218,7 +1266,9 @@ class TestTheLogSaysWhichCrashItWas:
             "0x7f1396928000. Reason: Page not present or supervisor privilege.\n"
             "Fatal Python error: Aborted\n")
         assert said and "graphics memory fault" in said
-        assert "--disable-dynamic-vram" in said, "no next step offered"
+        # All three transfer paths are off by default now, so the next step is
+        # no longer a fourth flag -- it is taking the VAE off the card.
+        assert "--cpu-vae" in said, "no next step offered"
 
     def test_an_ordinary_log_is_not_explained_away(self):
         from toolshed.exec.engine import explain_crash
