@@ -17,6 +17,7 @@ explicit material appearing in front of somebody who did not ask for it:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -158,3 +159,61 @@ class TestTheGateOnScreen:
         page.adult_section.unlock()
         page.adult_section.rows[0].checkbox.setChecked(True)
         assert "2 things" in page.total_label.text()
+
+
+class TestTheAuthoredRecipeIsReadable:
+    """A pack whose model is not in any upstream template has no .generated
+    file to derive from, so the loader has to find a hand-authored one too."""
+
+    def test_both_recipe_kinds_are_found(self, tmp_path, monkeypatch):
+        from toolshed import resources
+        from toolshed.catalog import packs as packs_module
+
+        (tmp_path / "recipes").mkdir()
+        (tmp_path / "recipes" / "derived.generated.yaml").write_text(
+            "estimated_download_bytes: 5000000000\n", encoding="utf-8")
+        (tmp_path / "recipes" / "byhand.authored.yaml").write_text(
+            "estimated_download_bytes: 7000000000\n", encoding="utf-8")
+        monkeypatch.setattr(resources, "resource_path", lambda _name: tmp_path)
+
+        assert packs_module._recipe_size("derived", tmp_path) == 5_000_000_000
+        assert packs_module._recipe_size("byhand", tmp_path) == 7_000_000_000
+        assert packs_module._recipe_size("missing", tmp_path) is None
+
+    def test_an_unfrozen_recipe_reports_no_size_rather_than_a_wrong_one(self, tmp_path):
+        from toolshed.catalog import packs as packs_module
+
+        (tmp_path / "recipes").mkdir()
+        (tmp_path / "recipes" / "x.authored.yaml").write_text(
+            "estimated_download_bytes: PENDING_FREEZE\n", encoding="utf-8")
+        assert packs_module._recipe_size("x", tmp_path) is None
+
+    def test_the_adult_recipe_exists_and_is_not_yet_frozen(self):
+        """It ships as a skeleton on purpose: the model has not been chosen,
+        and inventing a repo name is the one thing this file must not do."""
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+        try:
+            from freeze_manifest import pending_in
+        finally:
+            sys.path.pop(0)
+        import yaml
+
+        from toolshed import resources
+
+        path = (resources.resource_path("catalog") / "recipes"
+                / "image_sdxl_adult.authored.yaml")
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert doc["id"] == "image.sdxl_adult"
+        assert doc["default_checked"] is False
+        assert doc["custom_nodes"] == []
+        assert "files.checkpoint.repo" in pending_in(doc), (
+            "the repo must stay PENDING_FREEZE until a human picks the model")
+
+    def test_no_adult_pack_is_offered_while_it_is_unfrozen(self):
+        """The catalogue guard: a pack with no frozen size cannot be offered,
+        so the gate stays invisible until the facts exist."""
+        from toolshed.catalog.packs import adult, load_packs
+
+        assert adult(load_packs()) == ()

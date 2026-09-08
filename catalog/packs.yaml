@@ -89,4 +89,38 @@ packs:
     # setting in engine.py and --disable-smart-memory, either of which may
     # bring it back inside 20 GB. Re-measure with those before picking a
     # number, and do not guess one in the meantime.
+    #
+    # UPDATE, same card, with the allocator setting and all three safeguards:
+    # the VaeDecodeShapeTrellis failure is GONE -- shape, structure and texture
+    # stages all completed. It now reaches UnwrapMesh and fails there with
+    # HIPBLAS_STATUS_ALLOC_FAILED on a 3.04M-vertex, 6.17M-face mesh, 101
+    # seconds in. So the memory work helped and the pack still does not finish
+    # on a 20 GB gfx1100.
+    #
+    # SETTLED, by running it. The UnwrapMesh failure is not memory and not
+    # mesh size: HIPBLAS_STATUS_ALLOC_FAILED at 2005 charts, at 1012 and at
+    # 756, taking 101s then 0.40s then 1.81s, always at 0% of the first pass,
+    # with 19.8 GB free and 2 MB held by torch. Cutting the mesh by two thirds
+    # changed only how fast it failed.
+    #
+    # The cause is upstream and outside our reach. hipblasDgetrfBatched is a
+    # double-precision batched LU that gfx1100 does not provide, and
+    # comfy_extras/mesh3d/uv_unwrap/parameterize.py chooses its GPU branch on
+    #
+    #     use_gpu = device is not None and device.type == "cuda"
+    #
+    # with device=comfy.model_management.get_torch_device() -- on device type
+    # alone, never on whether the routine works. A complete numpy fallback sits
+    # in the else branch and this card can never reach it. Only --cpu changes
+    # that device, and that puts diffusion on the processor too, which is not a
+    # trade anyone would take.
+    #
+    # So TRELLIS.2 cannot finish on gfx1100 with ComfyUI v0.34.0. Everything up
+    # to the unwrap works -- shape, structure and texture all complete, and the
+    # mesh is built -- but the pack cannot produce a textured .glb.
+    #
+    # This is what experimental_on and the setup smoke test were for. The pack
+    # should stop being offered on AMD until upstream picks the CPU path when
+    # the GPU one is unavailable; that is a scope decision for the owner, so
+    # the flag below is unchanged and this is the evidence for making it.
     experimental_on: [amd]

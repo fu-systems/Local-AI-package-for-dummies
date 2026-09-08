@@ -1,0 +1,102 @@
+# HAND-AUTHORED, not derived. See docs/ADULT-PACKS.md.
+#
+# The graph is Comfy Org's image_sdxl_simple template, unchanged -- an SDXL
+# finetune is a drop-in for the same workflow, so nothing here diverges from
+# upstream except which checkpoint file gets downloaded. That is why this is
+# the only recipe not produced by tools/derive_catalog.py: there is no upstream
+# template for this model, because the model is not in one.
+#
+# ---------------------------------------------------------------------------
+# `repo`, `path` and `filename` are PENDING_FREEZE ON PURPOSE.
+#
+# Choosing the model is a person's decision and it has not been made. It cannot
+# be made from a model card either -- see criterion 6 in docs/ADULT-PACKS.md,
+# which is decided by looking at output, not by reading. Until someone picks
+# one and it passes criteria 1-7, writing a plausible repo name here would be
+# inventing the one fact this file exists to record.
+#
+# Once the three fields below are filled in:
+#
+#     python3 tools/freeze_manifest.py catalog/recipes/image_sdxl_adult.authored.yaml
+#
+# fills in revision, sha256, size_bytes, gated and licence from Hugging Face,
+# and the estimated download total from the sum. Then add the pack row to
+# catalog/packs.yaml (the shape is in docs/ADULT-PACKS.md) and the gate on the
+# choose screen picks it up with no code change.
+# ---------------------------------------------------------------------------
+
+schema_version: 1
+id: image.sdxl_adult
+name: PENDING_FREEZE
+blurb: PENDING_FREEZE
+modality: Pictures
+default_checked: false
+
+requires:
+  comfyui_min: 0.0.1
+  vendors:
+  - nvidia
+  - amd
+  # The same graph as image_sdxl_simple, so the same node classes. Regenerated
+  # by lint from the authored api.json rather than kept by hand -- invariant 10
+  # in docs/PLAN.md -- once that workflow triple exists.
+  node_classes:
+  - CLIPTextEncode
+  - CheckpointLoaderSimple
+  - EmptyLatentImage
+  - KSampler
+  - SaveImage
+  - VAEDecode
+
+licence:
+  id: PENDING_FREEZE
+  # Adult packs always gate, whatever the licence says: the gate here is the
+  # age confirmation on the choose screen, not a licence acceptance. A pack
+  # with `adult: true` can never be default_checked -- the loader refuses the
+  # catalogue outright if it is.
+  gate: notice
+
+custom_nodes: []
+estimated_download_bytes: PENDING_FREEZE
+
+variants:
+- id: PENDING_FREEZE
+  label: PENDING_FREEZE
+  when:
+    vram_gb_min: PENDING_FREEZE
+  files:
+  - checkpoint
+
+files:
+  checkpoint:
+    source: huggingface
+    # Criteria 1-7 in docs/ADULT-PACKS.md decide these three. In short: the
+    # author's own repo rather than a mirror, .safetensors, ungated or the gate
+    # documented, licence read, competent at both male and female anatomy, and
+    # not a booru/anime finetune.
+    repo: PENDING_FREEZE
+    revision: PENDING_FREEZE
+    path: PENDING_FREEZE
+    dest: checkpoints
+    filename: PENDING_FREEZE
+    sha256: PENDING_FREEZE
+    size_bytes: PENDING_FREEZE
+    gated: PENDING_FREEZE
+    licence: PENDING_FREEZE
+    from_node: CheckpointLoaderSimple
+
+workflows:
+- id: PENDING_FREEZE
+  title: Text to picture, adult
+  inject_as: PENDING_FREEZE
+  # The graph is the SDXL template. Only the checkpoint the loader points at
+  # differs, and that is written by the installer from `files` above.
+  derived_from:
+    repo: Comfy-Org/workflow_templates
+    commit: PENDING_FREEZE
+    template: image_sdxl_simple
+  shape: flat
+  bind_mode: node_ids
+  bind: {}
+
+presets: []
