@@ -191,17 +191,21 @@ class TestOpeningTheFolder:
         assert "could not open" not in page.status.text().lower()
 
 
-class TestMemoryFailuresThatDoNotSayOutOfMemory:
-    """A maths library that cannot get a workspace reports its own status code.
+class TestTheSolverThisCardDoesNotHave:
+    """The UV unwrap failure, and why it is not a memory problem.
 
-    Verbatim from a 3D unwrap on a 20 GB gfx1100, after the model had already
-    been built -- 3.04M vertices, 6.17M faces, 101 seconds in:
+    Measured on a 20 GB gfx1100, by running it: HIPBLAS_STATUS_ALLOC_FAILED at
+    2005 charts, at 1012, and at 756 -- taking 101s, then 0.40s, then 1.81s,
+    always at 0% of the first pass, with 19.8 GB free and 2 MB held by torch.
+    Shrinking the mesh by two thirds changed nothing except how fast it failed.
 
-        CUDA error: HIPBLAS_STATUS_ALLOC_FAILED when calling
-        `hipblasDgetrfBatched(handle, n, dA_array, ldda, ipiv_array, ...)`
+    hipblasDgetrfBatched is a double-precision batched LU, and
+    parameterize.py picks its GPU branch on `device.type == "cuda"` alone --
+    never on whether the routine works -- so the complete numpy fallback
+    sitting in the else branch is unreachable on this card.
 
-    Nothing in that says "out of memory", so it used to reach the user exactly
-    as written.
+    An earlier version of this file asserted the opposite, and the advice that
+    came with it cost someone an evening of shrinking meshes.
     """
 
     def explain(self, node_type: str, message: str) -> str:
@@ -214,28 +218,39 @@ class TestMemoryFailuresThatDoNotSayOutOfMemory:
                "`hipblasDgetrfBatched( handle, n, dA_array, ldda, ipiv_array, "
                "info_array, batchsize)`")
 
-    def test_a_blas_allocation_failure_is_recognised(self):
+    def test_it_is_not_reported_as_running_out_of_memory(self):
         said = self.explain("UnwrapMesh", self.HIPBLAS)
-        assert "ran out of memory" in said
+        assert "ran out of memory" not in said, said
+
+    def test_it_does_not_send_anyone_to_shrink_the_mesh(self):
+        """Disproven by measurement: 756 charts fails as surely as 2005."""
+        said = self.explain("UnwrapMesh", self.HIPBLAS)
+        assert "Decimate" not in said and "Remesh" not in said
+        assert "smaller" not in said.lower()
+
+    def test_it_says_the_machine_cannot_do_it_and_why_that_is_not_their_fault(self):
+        said = self.explain("UnwrapMesh", self.HIPBLAS)
+        assert "drivers do not provide" in said
+        assert "no setting here changes it" in said
         assert "HIPBLAS" not in said, "the raw status code is not an explanation"
 
-    def test_the_mesh_steps_get_advice_that_applies_to_them(self):
-        """"Ask for a smaller one" is meaningless when the photo decided the
-        size and there is no size on screen."""
+    def test_it_says_the_model_itself_survived(self):
+        """It did: shape, structure and texture all completed first."""
         said = self.explain("UnwrapMesh", self.HIPBLAS)
-        assert "Decimate Mesh" in said or "Remesh Mesh" in said
-        assert "picture or a video" not in said
+        assert "was built" in said
 
-    def test_the_cuda_spelling_is_caught_too(self):
-        said = self.explain("KSampler", "CUBLAS_STATUS_ALLOC_FAILED")
-        assert "ran out of memory" in said
-
-    def test_a_picture_step_still_gets_picture_advice(self):
+    def test_a_real_out_of_memory_still_gets_memory_advice(self):
         said = self.explain("KSampler", "Allocation on device: out of memory")
+        assert "ran out of memory" in said
         assert "picture or a video" in said
-        assert "Decimate Mesh" not in said
 
-    def test_an_unrelated_failure_is_not_dressed_up_as_memory(self):
+    def test_a_real_out_of_memory_on_a_mesh_step_still_names_the_mesh_levers(self):
+        """Lowering detail is right for an actual shortage -- just not for a
+        routine the card does not have."""
+        said = self.explain("DecimateMesh", "HIP out of memory")
+        assert "Decimate Mesh" in said or "Remesh Mesh" in said
+
+    def test_an_unrelated_failure_is_not_dressed_up_as_either(self):
         said = self.explain("LoadImage", "invalid file format")
         assert "ran out of memory" not in said
         assert "invalid file format" in said

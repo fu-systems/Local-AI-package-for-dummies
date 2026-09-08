@@ -97,8 +97,30 @@ packs:
     # seconds in. So the memory work helped and the pack still does not finish
     # on a 20 GB gfx1100.
     #
-    # Three distinct failure modes on one card now. This is the measurement
-    # docs/PLAN.md M0 asked for, and what it is saying is that 3D on AMD needs
-    # a decision -- default mesh detail scaled to the card, or the pack stays
-    # off for AMD -- rather than a fourth workaround.
+    # SETTLED, by running it. The UnwrapMesh failure is not memory and not
+    # mesh size: HIPBLAS_STATUS_ALLOC_FAILED at 2005 charts, at 1012 and at
+    # 756, taking 101s then 0.40s then 1.81s, always at 0% of the first pass,
+    # with 19.8 GB free and 2 MB held by torch. Cutting the mesh by two thirds
+    # changed only how fast it failed.
+    #
+    # The cause is upstream and outside our reach. hipblasDgetrfBatched is a
+    # double-precision batched LU that gfx1100 does not provide, and
+    # comfy_extras/mesh3d/uv_unwrap/parameterize.py chooses its GPU branch on
+    #
+    #     use_gpu = device is not None and device.type == "cuda"
+    #
+    # with device=comfy.model_management.get_torch_device() -- on device type
+    # alone, never on whether the routine works. A complete numpy fallback sits
+    # in the else branch and this card can never reach it. Only --cpu changes
+    # that device, and that puts diffusion on the processor too, which is not a
+    # trade anyone would take.
+    #
+    # So TRELLIS.2 cannot finish on gfx1100 with ComfyUI v0.34.0. Everything up
+    # to the unwrap works -- shape, structure and texture all complete, and the
+    # mesh is built -- but the pack cannot produce a textured .glb.
+    #
+    # This is what experimental_on and the setup smoke test were for. The pack
+    # should stop being offered on AMD until upstream picks the CPU path when
+    # the GPU one is unavailable; that is a scope decision for the owner, so
+    # the flag below is unchanged and this is the evidence for making it.
     experimental_on: [amd]

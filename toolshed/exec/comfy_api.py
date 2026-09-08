@@ -461,8 +461,28 @@ def _explain_rejection(reply: httpx.Response) -> ComfyError:
 # ones nobody here has seen yet.
 OUT_OF_MEMORY_SIGNS = (
     "out of memory",
-    "alloc_failed",
     "outofmemory",
+)
+
+# ...but a BLAS status code is NOT one of them, and treating it as one sent a
+# user on a long, useless hunt. Measured on a 20 GB gfx1100: the UV unwrap
+# fails with HIPBLAS_STATUS_ALLOC_FAILED at 2005 charts, at 1012, and at 756 --
+# in 101 seconds, then 0.40, then 1.81 -- always at 0% of the first pass, with
+# 19.8 GB free and 2 MB held by torch. A shortage does not behave like that.
+#
+# It is the call itself. hipblasDgetrfBatched is a *double-precision* batched
+# LU, and comfy_extras/mesh3d/uv_unwrap/parameterize.py picks the GPU branch on
+#
+#     use_gpu = device is not None and device.type == "cuda"
+#
+# with device=comfy.model_management.get_torch_device() -- device type alone,
+# never whether the routine works. There is a complete numpy path in the else
+# branch that this card can never reach.
+#
+# So: not a size, not a setting. Telling someone to lower a face count here
+# costs them an evening and cannot work.
+SOLVER_UNSUPPORTED_SIGNS = (
+    "alloc_failed",
 )
 
 
@@ -471,9 +491,21 @@ def _is_out_of_memory(message: str) -> bool:
     return any(sign in lowered for sign in OUT_OF_MEMORY_SIGNS)
 
 
+def _is_solver_unsupported(message: str) -> bool:
+    lowered = message.lower()
+    return any(sign in lowered for sign in SOLVER_UNSUPPORTED_SIGNS)
+
+
 def _explain_execution_error(data: dict) -> str:
     node = data.get("node_type") or data.get("node_id") or "a step"
     message = (data.get("exception_message") or "").strip()
+    if _is_solver_unsupported(message):
+        return (f"{node} needs a maths routine your graphics card's drivers do "
+                "not provide, so this step cannot run on this machine. Nothing "
+                "you chose caused it and no setting here changes it — it fails "
+                "the same way on a simple model as a detailed one. On AMD cards "
+                "this currently stops the 3D pack at the last step: the model "
+                "itself was built, only the texture wrapping could not finish.")
     if _is_out_of_memory(message):
         # "Try a smaller size" is good advice for a picture and useless for a
         # 3D model, where nothing on screen is a size and the run has already
