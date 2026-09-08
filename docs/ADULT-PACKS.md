@@ -132,15 +132,61 @@ mode builds its checkpoint dropdown from whatever is on disk
 declining to make that particular choice on their behalf, which is not the same
 as preventing it.
 
-## Next steps, in order
+## Everything is built except the one thing that needs a person
 
-1. Decide whether images-only is acceptable for the first cut (recommended).
-2. Verify candidates against criteria 1–5 with live Hugging Face lookups.
-3. Run the criterion-6 contact sheet on the AMD box; pick a winner, or pick a
-   checkpoint plus a LoRA.
-4. Write `tools/freeze_manifest.py` — blocking for the whole catalogue, not just
-   this.
-5. Author the recipe, freeze it, add the `adult: true` row to `packs.yaml`.
-6. Write the default negative prompt into the shipped workflow, and decide
-   whether it is editable.
-7. README: state plainly that the packs exist, are opt-in, and what the line is.
+Done and tested:
+
+* the gate, the age confirmation, and the catalogue refusing a pre-ticked adult
+  pack (`tests/unit/test_adult_gate.py`);
+* `tools/freeze_manifest.py`, which turns the PENDING_FREEZE facts into
+  verified ones from Hugging Face — this was blocking the **whole** catalogue,
+  not just this pack (`tests/unit/test_freeze_manifest.py`);
+* hand-authored recipes as a kind, since a model that is in no upstream
+  template has nothing to derive from (`.authored.yaml`, read by the loader
+  alongside `.generated.yaml`);
+* the recipe itself: `catalog/recipes/image_sdxl_adult.authored.yaml`.
+
+The recipe's `repo`, `path` and `filename` are `PENDING_FREEZE` deliberately.
+**Choosing the model is the step that cannot be automated**, for two reasons:
+no model card answers criterion 6, and Hugging Face is unreachable from the
+environment these notes were written in, so nothing about a candidate could be
+verified against a live source. A plausible repo name written here would be
+exactly the invented fact this file exists to prevent.
+
+### Turning it on, once a model is chosen
+
+1. Fill in `repo`, `path` and `filename` in the recipe.
+2. `python3 tools/freeze_manifest.py catalog/recipes/image_sdxl_adult.authored.yaml`
+   — fills in revision, sha256, size_bytes, gated, licence and the download
+   total. `--check` first shows what is outstanding.
+3. Fill in the human fields the tool deliberately never touches: `name`,
+   `blurb`, and the variant label and `vram_gb_min`.
+4. Add the row to `catalog/packs.yaml`:
+
+   ```yaml
+     - id: image.sdxl_adult
+       modality: Pictures
+       name: "Make pictures (adult)"
+       blurb: "Explicit images. Off unless you turn it on."
+       recipe: image_sdxl_adult
+       vram_gb_min: 8          # from the variant, once measured
+       licence: "<whatever the model's licence turns out to be>"
+       adult: true
+   ```
+
+   `default_checked` is not in that list on purpose — the loader raises if an
+   adult pack carries it.
+
+5. The gate on the choose screen picks it up with **no code change**. It is
+   invisible today only because the catalogue has nothing adult in it.
+
+Until step 4, `tests/unit/test_packs.py` would fail a pack with no frozen size,
+which is why the row is not there yet. That guard is the reason an unverified
+pack cannot ship, so it stays.
+
+### Still outstanding after that
+
+* The default negative prompt in the shipped workflow, and whether it is
+  editable.
+* README: state plainly that the packs exist, are opt-in, and what the line is.
+* Video: still recommended out of the first cut, for the reasons above.

@@ -65,13 +65,24 @@ class Pack:
         return None
 
 
+# Generated first, then hand-authored. Almost every recipe is derived from an
+# upstream template and ends in .generated.yaml; a pack whose graph is an
+# existing template but whose model is not (a different checkpoint in the same
+# SDXL workflow, say) has nothing upstream to derive from and is written by
+# hand. Both are read the same way, and the suffix says which kind it is
+# without anyone having to open it.
+RECIPE_SUFFIXES = (".generated.yaml", ".authored.yaml")
+
+
 def _recipe_size(recipe: str, catalog_dir: Path) -> int | None:
-    path = catalog_dir / "recipes" / f"{recipe}.generated.yaml"
-    if not path.is_file():
-        return None
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    size = data.get("estimated_download_bytes")
-    return size if isinstance(size, int) else None
+    for suffix in RECIPE_SUFFIXES:
+        path = catalog_dir / "recipes" / f"{recipe}{suffix}"
+        if not path.is_file():
+            continue
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        size = data.get("estimated_download_bytes")
+        return size if isinstance(size, int) else None
+    return None
 
 
 @lru_cache(maxsize=1)
