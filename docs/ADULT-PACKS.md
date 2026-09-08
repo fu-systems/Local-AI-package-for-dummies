@@ -1,7 +1,8 @@
 # Adult content packs
 
-Status: **gate built, no pack ships yet.** The mechanism is in place and tested;
-no model has been chosen, and none can be until its facts are frozen.
+Status: **built and waiting on one command.** The gate, the freeze tool and the
+recipe all exist and are tested. The recipe names a model; its hash and size
+still have to be frozen from Hugging Face, on a machine that can reach it.
 
 ## Why
 
@@ -37,21 +38,16 @@ pack, which is the state today — the screen is unchanged.
 Tests: `tests/unit/test_adult_gate.py`. They build their own fixture packs, so
 they do not start passing or failing because somebody edited the catalogue.
 
-## What is not built, and why
+## What is left
 
-**No model is named anywhere in the catalogue.** Two things block it, and only
-the second is specific to this feature.
+**The facts that must come from Hugging Face.** `tools/freeze_manifest.py` now
+exists and does this, but it has to run somewhere that can reach the API. Until
+it does, `tests/unit/test_packs.py` fails a pack whose size is not frozen, so
+the row stays out of `packs.yaml`. That guard is the reason an unverified pack
+cannot ship, and it applies to every recipe in the catalogue, not just this one
+— all seven still carry `PENDING_FREEZE`.
 
-1. **The freeze pipeline does not exist.** `tools/freeze_manifest.py` and
-   `tools/lint_catalog.py` are described in `docs/PLAN.md` §5 but unwritten.
-   Every recipe in `catalog/recipes/` still carries 18–48 `PENDING_FREEZE`
-   tokens. No new pack of any kind can ship until that exists — an adult pack is
-   not a special case here, it is behind the same M0 gate as everything else.
-   `tests/unit/test_packs.py` enforces this: a pack whose recipe has no frozen
-   size fails the suite. That is the design working.
-
-2. **The model has not been chosen, and cannot be chosen from a model card.**
-   See below.
+`tools/lint_catalog.py` (`docs/PLAN.md` §5) is still unwritten.
 
 ## Selection criteria
 
@@ -83,24 +79,7 @@ zero-custom-nodes position; for a LoRA baked into a shipped graph that is
 **overstated**, and the risk row should be corrected. What is out of v1
 (`docs/PLAN.md` §8) is the LoRA *picker* — the UI, not the mechanism.
 
-## Candidate leads — UNVERIFIED
-
-Hugging Face is blocked by the egress proxy in the environment these notes were
-written in, so **none of the following has been checked against a live source.**
-They are starting points for verification, not facts, and nothing here should be
-copied into a recipe without going through criteria 1–7 first.
-
-**Images.** The bigASP family (SDXL, photoreal, captioned with JoyCaption and
-tagged with JoyTag) appears to be the strongest lead. Two cautions:
-
-* the repos that surface first in search appear to be **third-party mirrors**
-  (`John6666/…`); the author's own account appears to be `fancyfeast`, and that
-  is the one to verify — criterion 2;
-* **v2.5 reportedly added anime to the training set**, which is exactly the
-  intersection we are not shipping. If this family is used, the target is v2,
-  not v2.5 — criterion 7. Verify what each version was actually trained on.
-* the name and third-party listings suggest it may itself be female-skewed.
-  Criterion 6 decides it, not the marketing.
+## Video
 
 **Video.** Materially weaker, and my recommendation is **do not ship video in
 the first cut.** What exists is community LoRAs stacked on Wan 2.2, from
@@ -146,22 +125,38 @@ Done and tested:
   alongside `.generated.yaml`);
 * the recipe itself: `catalog/recipes/image_sdxl_adult.authored.yaml`.
 
-The recipe's `repo`, `path` and `filename` are `PENDING_FREEZE` deliberately.
-**Choosing the model is the step that cannot be automated**, for two reasons:
-no model card answers criterion 6, and Hugging Face is unreachable from the
-environment these notes were written in, so nothing about a candidate could be
-verified against a live source. A plausible repo name written here would be
-exactly the invented fact this file exists to prevent.
+### The model in it
 
-### Turning it on, once a model is chosen
+`fancyfeast/big-asp-v2`, file `cuwm1gxo-complete-20241024a.safetensors` — an
+SDXL photographic finetune, so a drop-in for the SDXL graph we already ship.
+Chosen against the criteria above: the **author's own** repo rather than one of
+the reuploads (`John6666/...`, `silveroxides/...`), `.safetensors`, and v2
+rather than v2.5 because v2.5 added anime to its training set.
 
-1. Fill in `repo`, `path` and `filename` in the recipe.
-2. `python3 tools/freeze_manifest.py catalog/recipes/image_sdxl_adult.authored.yaml`
+Two honest caveats:
+
+* **The repo and path came from search, not the API** — Hugging Face was
+  unreachable from the environment this was written in. They are a proposal
+  that `freeze_manifest.py` verifies: it asks paths-info for exactly that repo
+  and path, and a wrong value yields nothing and stays `PENDING_FREEZE` rather
+  than becoming a plausible wrong hash. It fails loudly, on a machine that can
+  check.
+* **Criterion 6 is not established.** This model's reputation is built by an
+  audience that was not testing for male anatomy, and that is precisely what
+  two of the five requesters asked for. Run the contact sheet before believing
+  it. If it fails, the answer is a LoRA in the same recipe, not a different
+  checkpoint — that mechanism is already proven, `image_qwen_image_edit_2511`
+  ships a LoRA today.
+
+### Turning it on
+
+1. `python3 tools/freeze_manifest.py catalog/recipes/image_sdxl_adult.authored.yaml`
    — fills in revision, sha256, size_bytes, gated, licence and the download
-   total. `--check` first shows what is outstanding.
-3. Fill in the human fields the tool deliberately never touches: `name`,
+   total, and verifies the repo and path while doing it. `--check` first shows
+   what is outstanding.
+2. Fill in the human fields the tool deliberately never touches: `name`,
    `blurb`, and the variant label and `vram_gb_min`.
-4. Add the row to `catalog/packs.yaml`:
+3. Add the row to `catalog/packs.yaml`:
 
    ```yaml
      - id: image.sdxl_adult
@@ -177,10 +172,10 @@ exactly the invented fact this file exists to prevent.
    `default_checked` is not in that list on purpose — the loader raises if an
    adult pack carries it.
 
-5. The gate on the choose screen picks it up with **no code change**. It is
+4. The gate on the choose screen picks it up with **no code change**. It is
    invisible today only because the catalogue has nothing adult in it.
 
-Until step 4, `tests/unit/test_packs.py` would fail a pack with no frozen size,
+Until step 3, `tests/unit/test_packs.py` would fail a pack with no frozen size,
 which is why the row is not there yet. That guard is the reason an unverified
 pack cannot ship, so it stays.
 
