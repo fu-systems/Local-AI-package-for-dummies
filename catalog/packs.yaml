@@ -89,4 +89,16 @@ packs:
     # setting in engine.py and --disable-smart-memory, either of which may
     # bring it back inside 20 GB. Re-measure with those before picking a
     # number, and do not guess one in the meantime.
+    #
+    # UPDATE, same card, with the allocator setting and all three safeguards:
+    # the VaeDecodeShapeTrellis failure is GONE -- shape, structure and texture
+    # stages all completed. It now reaches UnwrapMesh and fails there with
+    # HIPBLAS_STATUS_ALLOC_FAILED on a 3.04M-vertex, 6.17M-face mesh, 101
+    # seconds in. So the memory work helped and the pack still does not finish
+    # on a 20 GB gfx1100.
+    #
+    # Three distinct failure modes on one card now. This is the measurement
+    # docs/PLAN.md M0 asked for, and what it is saying is that 3D on AMD needs
+    # a decision -- default mesh detail scaled to the card, or the pack stays
+    # off for AMD -- rather than a fourth workaround.
     experimental_on: [amd]

@@ -445,19 +445,55 @@ def _explain_rejection(reply: httpx.Response) -> ComfyError:
                       detail="\n".join(parts) or json.dumps(body, indent=2))
 
 
+# Running out of graphics memory does not always say "out of memory". A maths
+# library asked for a workspace and failed to get one reports its own status
+# code instead, and the user sees a line like
+#
+#     CUDA error: HIPBLAS_STATUS_ALLOC_FAILED when calling
+#     `hipblasDgetrfBatched(handle, n, dA_array, ldda, ipiv_array, ...)`
+#
+# from a 3D unwrap. That is the same problem wearing a different name, and
+# without this it reached the user verbatim -- which is the exact failure this
+# product exists to prevent.
+#
+# Substrings rather than exact codes: hipBLAS, cuBLAS, hipSOLVER and cuSOLVER
+# all spell it "<LIB>_STATUS_ALLOC_FAILED", and matching the tail catches the
+# ones nobody here has seen yet.
+OUT_OF_MEMORY_SIGNS = (
+    "out of memory",
+    "alloc_failed",
+    "outofmemory",
+)
+
+
+def _is_out_of_memory(message: str) -> bool:
+    lowered = message.lower()
+    return any(sign in lowered for sign in OUT_OF_MEMORY_SIGNS)
+
+
 def _explain_execution_error(data: dict) -> str:
     node = data.get("node_type") or data.get("node_id") or "a step"
     message = (data.get("exception_message") or "").strip()
-    if "out of memory" in message.lower():
+    if _is_out_of_memory(message):
         # "Try a smaller size" is good advice for a picture and useless for a
         # 3D model, where nothing on screen is a size and the run has already
         # cost three minutes. Say which step ran out, and give a step that
         # applies: a workflow chaining six models keeps them all on the card,
         # and that is the memory the next one cannot have.
-        return (f"Your graphics card ran out of memory at {node}. "
-                "If this is a picture or a video, ask for a smaller one. "
-                "Otherwise the workflow is holding several models on the card "
-                "at once: add --disable-smart-memory to Extra ComfyUI options, "
-                "which makes it put each one back when it is done. That is "
-                "slower and it fits in far less memory.")
+        advice = ("If this is a picture or a video, ask for a smaller one. "
+                  "Otherwise the workflow is holding several models on the "
+                  "card at once: add --disable-smart-memory to Extra ComfyUI "
+                  "options, which makes it put each one back when it is done. "
+                  "That is slower and it fits in far less memory.")
+        # The mesh steps are their own case. Nothing the user typed decides
+        # how big the mesh got -- the photo did -- so the lever is the detail
+        # the workflow asks for, and naming it beats "ask for something
+        # smaller" on a screen with no size on it.
+        if any(word in str(node) for word in ("Mesh", "Unwrap", "Remesh", "Decimate")):
+            advice = ("The model came out with millions of faces, and this "
+                      "step works on all of them at once. Lower resolution on "
+                      "Remesh Mesh, or the face count on Decimate Mesh, and "
+                      "run it again — a simpler mesh fits, and for most photos "
+                      "it looks the same.")
+        return f"Your graphics card ran out of memory at {node}. {advice}"
     return f"{node} failed: {message}" if message else f"{node} failed."

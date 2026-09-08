@@ -189,3 +189,53 @@ class TestOpeningTheFolder:
         page.open_folder()
         assert called and str(tmp_path / "output") in called[0][-1]
         assert "could not open" not in page.status.text().lower()
+
+
+class TestMemoryFailuresThatDoNotSayOutOfMemory:
+    """A maths library that cannot get a workspace reports its own status code.
+
+    Verbatim from a 3D unwrap on a 20 GB gfx1100, after the model had already
+    been built -- 3.04M vertices, 6.17M faces, 101 seconds in:
+
+        CUDA error: HIPBLAS_STATUS_ALLOC_FAILED when calling
+        `hipblasDgetrfBatched(handle, n, dA_array, ldda, ipiv_array, ...)`
+
+    Nothing in that says "out of memory", so it used to reach the user exactly
+    as written.
+    """
+
+    def explain(self, node_type: str, message: str) -> str:
+        from toolshed.exec.comfy_api import _explain_execution_error
+
+        return _explain_execution_error(
+            {"node_type": node_type, "exception_message": message})
+
+    HIPBLAS = ("CUDA error: HIPBLAS_STATUS_ALLOC_FAILED when calling "
+               "`hipblasDgetrfBatched( handle, n, dA_array, ldda, ipiv_array, "
+               "info_array, batchsize)`")
+
+    def test_a_blas_allocation_failure_is_recognised(self):
+        said = self.explain("UnwrapMesh", self.HIPBLAS)
+        assert "ran out of memory" in said
+        assert "HIPBLAS" not in said, "the raw status code is not an explanation"
+
+    def test_the_mesh_steps_get_advice_that_applies_to_them(self):
+        """"Ask for a smaller one" is meaningless when the photo decided the
+        size and there is no size on screen."""
+        said = self.explain("UnwrapMesh", self.HIPBLAS)
+        assert "Decimate Mesh" in said or "Remesh Mesh" in said
+        assert "picture or a video" not in said
+
+    def test_the_cuda_spelling_is_caught_too(self):
+        said = self.explain("KSampler", "CUBLAS_STATUS_ALLOC_FAILED")
+        assert "ran out of memory" in said
+
+    def test_a_picture_step_still_gets_picture_advice(self):
+        said = self.explain("KSampler", "Allocation on device: out of memory")
+        assert "picture or a video" in said
+        assert "Decimate Mesh" not in said
+
+    def test_an_unrelated_failure_is_not_dressed_up_as_memory(self):
+        said = self.explain("LoadImage", "invalid file format")
+        assert "ran out of memory" not in said
+        assert "invalid file format" in said
