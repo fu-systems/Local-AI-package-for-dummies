@@ -188,13 +188,16 @@ class TestTheAuthoredRecipeIsReadable:
             "estimated_download_bytes: PENDING_FREEZE\n", encoding="utf-8")
         assert packs_module._recipe_size("x", tmp_path) is None
 
-    def test_the_adult_recipe_exists_and_is_not_yet_frozen(self):
-        """It ships as a skeleton on purpose: the model has not been chosen,
-        and inventing a repo name is the one thing this file must not do."""
+    def test_the_adult_recipe_names_a_model_but_is_not_yet_frozen(self):
+        """The repo and path are a proposal for freeze_manifest.py to verify.
+        The hash is the thing that must never be a proposal: it is what every
+        downloaded byte is checked against, so it stays PENDING until the API
+        has said what it is."""
         import sys
 
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
         try:
+            from freeze_manifest import PENDING as PENDING_TOKEN
             from freeze_manifest import pending_in
         finally:
             sys.path.pop(0)
@@ -208,8 +211,14 @@ class TestTheAuthoredRecipeIsReadable:
         assert doc["id"] == "image.sdxl_adult"
         assert doc["default_checked"] is False
         assert doc["custom_nodes"] == []
-        assert "files.checkpoint.repo" in pending_in(doc), (
-            "the repo must stay PENDING_FREEZE until a human picks the model")
+        pending = pending_in(doc)
+        assert doc["files"]["checkpoint"]["repo"] != PENDING_TOKEN
+        assert doc["files"]["checkpoint"]["path"].endswith(".safetensors")
+        assert "files.checkpoint.sha256" in pending, (
+            "a hash must come from the API, never from a recipe author")
+        assert "files.checkpoint.size_bytes" in pending
+        assert "estimated_download_bytes" in pending, (
+            "the download total shown to the user cannot be a guess")
 
     def test_no_adult_pack_is_offered_while_it_is_unfrozen(self):
         """The catalogue guard: a pack with no frozen size cannot be offered,

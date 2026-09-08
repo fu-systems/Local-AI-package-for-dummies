@@ -28,6 +28,32 @@ packs:
     vram_gb_min: 8          # provisional
     licence: "Apache 2.0 — free for any use, including commercial."
     default_checked: true
+    # UNVERIFIED, and it matters more than anything else here: on a 20 GB
+    # gfx1100 this pack returned a flat, featureless square for every prompt
+    # tried, including a plainly benign one. No error -- a finished image with
+    # nothing in it, which is what a NaN latent decodes to.
+    #
+    # A first guess blamed the fp8 text encoder, because that card logs
+    # "emulated ops: float8_e5m2, mxfp8, float8_e4m3fn, nvfp4" and this
+    # recipe's encoder is qwen_3_4b_fp8_mixed. THAT GUESS IS WRONG, and the
+    # source says so: comfy/sd1_clip.py builds a text encoder with
+    # mixed_precision_ops(..., full_precision_mm=True) and no `disabled` set,
+    # while the "emulated ops" line comes from pick_operations in comfy/ops.py,
+    # which only ever runs for a DIFFUSION model config. A text encoder never
+    # reaches that code path, so fp8 emulation cannot be changing its numerics.
+    #
+    # The proposed experiment was wrong too: SDXL differs from this pack in
+    # encoder, sampler shift, VAE and diffusion model all at once, so a picture
+    # from it would have isolated nothing.
+    #
+    # Still unexplained, therefore, and still the pack that is default_checked
+    # and called "the best place to start" on a vendor that is a fixed
+    # constraint (docs/PLAN.md D2). What would actually narrow it, in order:
+    # run the bf16 recipe (image_z_image_turbo) -- same graph, same sampler,
+    # only the quantisation differs, which is the single-variable test; and
+    # check whether the run logs "Using MixedPrecisionOps for text encoder"
+    # WITHOUT an accompanying "emulated ops" line, which would confirm the two
+    # come from different call sites.
 
   - id: image.sdxl
     modality: Pictures

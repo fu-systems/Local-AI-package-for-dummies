@@ -7,22 +7,19 @@
 # template for this model, because the model is not in one.
 #
 # ---------------------------------------------------------------------------
-# `repo`, `path` and `filename` are PENDING_FREEZE ON PURPOSE.
-#
-# Choosing the model is a person's decision and it has not been made. It cannot
-# be made from a model card either -- see criterion 6 in docs/ADULT-PACKS.md,
-# which is decided by looking at output, not by reading. Until someone picks
-# one and it passes criteria 1-7, writing a plausible repo name here would be
-# inventing the one fact this file exists to record.
-#
-# Once the three fields below are filled in:
+# NOT YET FROZEN. Run this on a machine that can reach Hugging Face:
 #
 #     python3 tools/freeze_manifest.py catalog/recipes/image_sdxl_adult.authored.yaml
 #
-# fills in revision, sha256, size_bytes, gated and licence from Hugging Face,
-# and the estimated download total from the sum. Then add the pack row to
-# catalog/packs.yaml (the shape is in docs/ADULT-PACKS.md) and the gate on the
-# choose screen picks it up with no code change.
+# It fills in revision, sha256, size_bytes, gated and licence, and the download
+# total from the sum -- and it verifies the repo and path below while doing so,
+# because paths-info either returns that exact file or it does not. Anything it
+# cannot read stays PENDING_FREEZE rather than becoming a plausible wrong value.
+#
+# Then fill in name, blurb and the variant label (the tool never writes a human
+# field), add the pack row to catalog/packs.yaml -- the shape is in
+# docs/ADULT-PACKS.md -- and the gate on the choose screen picks it up with no
+# code change at all.
 # ---------------------------------------------------------------------------
 
 schema_version: 1
@@ -70,15 +67,37 @@ variants:
 files:
   checkpoint:
     source: huggingface
-    # Criteria 1-7 in docs/ADULT-PACKS.md decide these three. In short: the
-    # author's own repo rather than a mirror, .safetensors, ungated or the gate
-    # documented, licence read, competent at both male and female anatomy, and
-    # not a booru/anime finetune.
-    repo: PENDING_FREEZE
+    # bigASP v2: an SDXL finetune on several million photographs, so a drop-in
+    # for the graph above. Against the criteria in docs/ADULT-PACKS.md:
+    #
+    #   1 huggingface.co                                          yes
+    #   2 the author's own repo, not a mirror                      yes -- fancyfeast
+    #     (John6666/... and silveroxides/... are reuploads; a mirror can be
+    #      replaced under a frozen hash, which is the whole point of freezing)
+    #   3 .safetensors                                             yes
+    #   4 gated?                                                   freeze reads it
+    #   5 licence                                                  freeze reads it
+    #   6 competent at male and female anatomy                     NOT ESTABLISHED
+    #   7 not a booru/anime finetune                               yes -- v2 is
+    #     photographic. v2.5 added anime, so v2 is the deliberate choice here.
+    #
+    # Criterion 6 is the one the two users who asked for this actually cared
+    # about, and nothing on a model card answers it. It needs the contact sheet
+    # in docs/ADULT-PACKS.md. If this model cannot do it, the recipe grows a
+    # LoRA rather than changing checkpoint -- the mechanism is already proven,
+    # image_qwen_image_edit_2511_int8 ships one.
+    #
+    # The three values below came from search rather than the API, because
+    # Hugging Face was unreachable when they were written. They are a proposal,
+    # not a frozen fact: tools/freeze_manifest.py asks paths-info for exactly
+    # this repo and path, and if either is wrong it finds nothing and leaves
+    # sha256 and size_bytes PENDING_FREEZE rather than inventing them. A wrong
+    # guess here fails loudly at freeze time, on a machine that can check.
+    repo: fancyfeast/big-asp-v2
     revision: PENDING_FREEZE
-    path: PENDING_FREEZE
+    path: cuwm1gxo-complete-20241024a.safetensors
     dest: checkpoints
-    filename: PENDING_FREEZE
+    filename: cuwm1gxo-complete-20241024a.safetensors
     sha256: PENDING_FREEZE
     size_bytes: PENDING_FREEZE
     gated: PENDING_FREEZE

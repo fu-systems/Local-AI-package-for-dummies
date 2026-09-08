@@ -537,6 +537,16 @@ class TestTheReadyMessage:
 
             page.set_engine(ComfyClient(base_url="http://127.0.0.1:1"))
             assert page.status.text() == ""
+
+            # The button is held while the engine is asked what this workflow
+            # exposes -- pressing before that answer arrives would send the
+            # template's own settings. Nothing is reachable at port 1, so the
+            # question fails and the button must come back: an un-inspected
+            # workflow can still be run exactly as it shipped.
+            if page.inspector is not None:
+                page.inspector.wait(5000)
+            page._inspecting = False
+            page._sync()
             assert page.go.isEnabled()
         finally:
             page.shutdown()

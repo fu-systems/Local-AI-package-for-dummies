@@ -53,6 +53,28 @@ CONTROL_SLOT = "__control_after_generate__"
 # expressed as a list of choices instead of a type name.
 SCALAR_WIDGET_TYPES = {"INT", "FLOAT", "STRING", "BOOLEAN"}
 
+# A dropdown whose choice decides which further widgets exist. SaveVideo's
+# `format`, SaveImageAdvanced's `format` and RemeshMesh's `sign_mode` are all
+# one of these, so three of the six workflows we ship contain at least one.
+#
+# The engine wants the choice under its own name and each of the chosen
+# branch's widgets under a DOTTED name. Read from comfy_api/latest/_io.py at
+# v0.34.0: DynamicCombo._expand_schema_for_dynamic looks up `live_inputs[id]`
+# to pick the branch, then parse_class_inputs recurses with that id as the
+# prefix, and finalize_prefix joins with "." -- so `format` selects, and
+# `format.bit_depth` is where the branch value has to be.
+#
+# Getting this wrong is silent in the worst way. Validation passes, because a
+# missing `format` means the branch is never expanded and so nothing is ever
+# reported missing; the node then reaches execute() without a required
+# argument and dies with a TypeError -- after the picture or the whole video
+# has already been made.
+DYNAMIC_COMBO_TYPE = "COMFY_DYNAMICCOMBO_V3"
+
+# The tag whose _io.py the naming above was read from. Same guard as the
+# engine flags: a rename upstream must not fail quietly.
+DYNAMIC_COMBO_VERIFIED_AGAINST = "v0.34.0"
+
 
 class ConversionError(RuntimeError):
     """The workflow cannot be expressed as an API prompt."""
@@ -78,11 +100,24 @@ class InputSpec:
         return _is_widget(self.type)
 
     @property
+    def is_dynamic_combo(self) -> bool:
+        return self.type == DYNAMIC_COMBO_TYPE
+
+    @property
+    def branches(self) -> dict[str, tuple[str, ...]]:
+        """Option key -> the widgets that option brings with it."""
+        return _branch_inputs(self.options) if self.is_dynamic_combo else {}
+
+    @property
     def choices(self) -> tuple[str, ...]:
         if isinstance(self.type, list):
             return tuple(str(c) for c in self.type)
         if self.type == "COMBO":
             return tuple(str(c) for c in (self.options.get("options") or ()))
+        if self.is_dynamic_combo:
+            # The branch keys are the dropdown's choices, so a settings screen
+            # can offer them like any other combo.
+            return tuple(self.branches)
         return ()
 
     @property
@@ -115,6 +150,26 @@ class NodeSpec:
     def input_set(self) -> frozenset[str]:
         return frozenset(self.inputs)
 
+    @property
+    def dynamic_combos(self) -> dict[str, dict[str, tuple[str, ...]]]:
+        """Every dynamic combo on this node, with its branches."""
+        return {s.name: s.branches for s in self.specs if s.is_dynamic_combo}
+
+    def accepts(self, key: str) -> bool:
+        """Is this a name the engine will take?
+
+        A dotted name is valid when its base is a dynamic combo here and the
+        leaf belongs to one of that combo's branches. Checking the leaf too
+        means a stale value from a branch nobody selected cannot ride along.
+        """
+        if key in self.input_set:
+            return True
+        base, dot, leaf = key.partition(".")
+        if not dot:
+            return False
+        branches = self.dynamic_combos.get(base)
+        return bool(branches) and any(leaf in names for names in branches.values())
+
     def spec_for(self, input_name: str) -> InputSpec | None:
         return next((s for s in self.specs if s.name == input_name), None)
 
@@ -126,7 +181,31 @@ def _is_widget(type_: Any) -> bool:
     # its choices under options["options"]. TRELLIS.2, the mesh nodes and
     # SaveVideo are all V3, so treating this as a wired input dropped every one
     # of their dropdown values and broke the 3D and video graphs outright.
-    return type_ == "COMBO" or type_ in SCALAR_WIDGET_TYPES
+    return type_ == "COMBO" or type_ == DYNAMIC_COMBO_TYPE or type_ in SCALAR_WIDGET_TYPES
+
+
+def _branch_inputs(options: dict) -> dict[str, tuple[str, ...]]:
+    """A dynamic combo's branches: option key -> its widget names, in order.
+
+    Shape from /object_info, per DynamicCombo.Option.as_dict at the pinned tag:
+    ``{"options": [{"key": "png", "inputs": {"required": {...}, "optional": {...}}}]}``
+    Required before optional, matching the order the editor lays widgets out.
+    """
+    branches: dict[str, tuple[str, ...]] = {}
+    for option in options.get("options") or ():
+        if not isinstance(option, dict):
+            continue
+        key = option.get("key")
+        inner = option.get("inputs")
+        if key is None or not isinstance(inner, dict):
+            continue
+        names: list[str] = []
+        for section in ("required", "optional"):
+            block = inner.get(section)
+            if isinstance(block, dict):
+                names.extend(block)
+        branches[str(key)] = tuple(names)
+    return branches
 
 
 def specs_from_object_info(doc: dict) -> dict[str, NodeSpec]:
@@ -413,17 +492,40 @@ def _widget_inputs(node: dict, spec: NodeSpec) -> dict[str, Any]:
     """
     named = node.get("widgets_values_named")
     if isinstance(named, dict):
-        return {k: v for k, v in named.items() if k in spec.input_set}
+        # accepts(), not input_set: a dynamic combo's branch values arrive as
+        # "format.bit_depth", which is not a top-level input name and so used
+        # to be filtered out here -- taking the whole branch with it.
+        return {k: v for k, v in named.items() if spec.accepts(k)}
 
     values = node.get("widgets_values")
     if not isinstance(values, list):
         return {}
 
+    # Positional. A dynamic combo takes its own slot and is then followed by
+    # the widgets of whichever branch it selected -- so how many slots it
+    # consumes is not known until its value is read, and a static slot list
+    # cannot express it. Walk instead.
+    combos = spec.dynamic_combos
     out: dict[str, Any] = {}
-    for slot_name, value in zip(spec.widget_slots, values, strict=False):
-        if slot_name == CONTROL_SLOT or slot_name not in spec.input_set:
+    index = 0
+    for slot_name in spec.widget_slots:
+        if index >= len(values):
+            break
+        value = values[index]
+        index += 1
+        if slot_name == CONTROL_SLOT:
             continue
-        out[slot_name] = value
+        if slot_name in combos:
+            if slot_name in spec.input_set:
+                out[slot_name] = value
+            for nested in combos[slot_name].get(str(value), ()):
+                if index >= len(values):
+                    break
+                out[f"{slot_name}.{nested}"] = values[index]
+                index += 1
+            continue
+        if slot_name in spec.input_set:
+            out[slot_name] = value
     return out
 
 

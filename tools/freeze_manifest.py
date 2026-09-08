@@ -222,16 +222,37 @@ def freeze_recipe(doc: dict, hf: HuggingFace) -> Report:
 
         for key in keys:
             entry = files[key]
-            _set(entry, "revision", sha, key, report)
+            item = entries.get(entry.get("path"))
+            file_sha, size = file_facts(item) if item is not None else (PENDING, PENDING)
+
+            # The revision and the hash are one fact in two fields, and they
+            # must move together. Advancing revision to a new commit while
+            # leaving the old commit's sha256 in place builds a manifest that
+            # points a new URL at an old hash: every install then downloads a
+            # file that fails verification, and the message blames the user's
+            # connection. So if the commit has moved and no new hash came back,
+            # clear both and say so.
+            moved = (entry.get("revision") not in (PENDING, None, sha)
+                     and sha != PENDING)
+            if moved and file_sha == PENDING:
+                entry["revision"] = PENDING
+                entry["sha256"] = PENDING
+                entry["size_bytes"] = PENDING
+                report.problems.append(
+                    f"{key}: {repo} has moved to {sha[:12]} but its hash could not "
+                    f"be read; revision and sha256 cleared rather than paired with "
+                    f"the previous commit's hash")
+                continue
+            # A real re-freeze: the commit moved AND a hash came back with it,
+            # so both may be replaced -- together, from the same commit.
+            _set(entry, "revision", sha, key, report, overwrite=moved)
             _set(entry, "gated", gated, key, report)
             _set(entry, "licence", licence, key, report)
-            item = entries.get(entry.get("path"))
             if item is None:
                 _note_pending(entry, key, ("sha256", "size_bytes"), report)
                 continue
-            file_sha, size = file_facts(item)
-            _set(entry, "sha256", file_sha, key, report)
-            _set(entry, "size_bytes", size, key, report)
+            _set(entry, "sha256", file_sha, key, report, overwrite=True)
+            _set(entry, "size_bytes", size, key, report, overwrite=True)
 
     # The total the confirmation screen shows, once every part of it is known.
     sizes = [f.get("size_bytes") for f in files.values()]
@@ -247,12 +268,22 @@ def freeze_recipe(doc: dict, hf: HuggingFace) -> Report:
     return report
 
 
-def _set(entry: dict, field_name: str, value: Any, key: str, report: Report) -> None:
+def _set(entry: dict, field_name: str, value: Any, key: str, report: Report,
+         *, overwrite: bool = False) -> None:
     if value == PENDING or value is None:
         if entry.get(field_name) == PENDING:
             report.still_pending.append(f"{key}.{field_name}")
         return
-    if entry.get(field_name) == value:
+    current = entry.get(field_name)
+    if current == value:
+        return
+    if current not in (PENDING, None) and not overwrite:
+        # A frozen fact that now reads differently is either an upstream
+        # change or a mistake, and this tool cannot tell which. Say so rather
+        # than quietly replacing it.
+        report.problems.append(
+            f"{key}.{field_name} is already frozen as {current!r} but the API now "
+            f"says {value!r}; left alone -- reset it to {PENDING} to re-freeze")
         return
     entry[field_name] = value
     report.frozen.append(f"{key}.{field_name}")
@@ -282,10 +313,81 @@ def pending_in(doc: Any, path: str = "") -> list[str]:
 # cli
 # --------------------------------------------------------------------------
 
+def _rewritten(text: str, doc: dict) -> str:
+    """The original file with only the frozen scalars replaced.
+
+    A YAML re-dump loses every comment, and in this repo the comments are the
+    provenance -- why a model was chosen, which criteria it met, what is still
+    unverified. Losing them on the first freeze would be worse than the freeze
+    is worth. So the values are edited in place by key, at their own
+    indentation, and nothing else in the file is disturbed.
+
+    Deliberately literal about structure rather than clever: it only rewrites a
+    scalar whose key it recognises, in a place it recognises, and leaves every
+    other line exactly as it found it.
+    """
+    files = doc.get("files") or {}
+    total = doc.get("estimated_download_bytes")
+
+    def render(value: Any) -> str:
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        return str(value)
+
+    out: list[str] = []
+    in_files = False
+    files_indent = 0
+    file_key: str | None = None
+    key_indent: int | None = None
+
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            out.append(line)
+            continue
+        indent = len(line) - len(line.lstrip())
+        name = stripped.split(":", 1)[0].strip().lstrip("- ")
+
+        if in_files and indent <= files_indent:
+            in_files, file_key, key_indent = False, None, None
+        if not in_files and name == "files" and stripped.endswith(":"):
+            in_files, files_indent = True, indent
+            out.append(line)
+            continue
+        if (in_files and stripped.endswith(":") and name in files
+                and (key_indent is None or indent <= key_indent)):
+            file_key, key_indent = name, indent
+            out.append(line)
+            continue
+
+        value: Any = None
+        if not in_files and indent == 0 and name == "estimated_download_bytes" \
+                and isinstance(total, int):
+            value = total
+        elif file_key and key_indent is not None and indent > key_indent \
+                and name in FROZEN_FIELDS:
+            entry = files.get(file_key) or {}
+            if name in entry and entry[name] != PENDING:
+                value = entry[name]
+
+        if value is None:
+            out.append(line)
+            continue
+        out.append(f"{' ' * indent}{name}: {render(value)}\n")
+    return "".join(out)
+
+
 def recipe_paths(args: argparse.Namespace) -> list[Path]:
+    if args.recipes:
+        # Named recipes win, even alongside --check. Silently scanning the
+        # whole catalogue when someone asked about one file is a small lie
+        # that reads as a much bigger answer.
+        return [Path(p) for p in args.recipes]
     if args.all or args.check:
         return sorted((REPO / "catalog" / "recipes").glob("*.yaml"))
-    return [Path(p) for p in args.recipes]
+    return []
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -320,8 +422,6 @@ def main(argv: list[str] | None = None) -> int:
     problems = 0
     for path in paths:
         text = path.read_text(encoding="utf-8")
-        header = "".join(line for line in text.splitlines(keepends=True)
-                         if line.startswith("#"))
         doc = yaml.safe_load(text) or {}
         print(f"\n{path.name}")
         report = freeze_recipe(doc, hf)
@@ -335,8 +435,13 @@ def main(argv: list[str] | None = None) -> int:
             problems += 1
 
         if report.changed:
-            body = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100)
-            path.write_text(header + body, encoding="utf-8")
+            # Rewritten line by line rather than re-dumped. yaml.safe_dump
+            # keeps no comments at all, and the adult recipe carries 35 lines
+            # of indented rationale explaining which model was chosen and why
+            # -- running the documented freeze command would have deleted every
+            # word of it. Only the scalar values this tool is allowed to write
+            # are touched; everything else in the file survives byte for byte.
+            path.write_text(_rewritten(text, doc), encoding="utf-8")
             print(f"  wrote    {path}")
 
     return 1 if problems else 0

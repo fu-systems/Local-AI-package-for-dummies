@@ -134,8 +134,19 @@ class Safeguard:
 # turning off async offload and pinned memory made the fault rarer without
 # making it stop.
 #
-# So the third flag, which is the one that actually takes that path out:
+# So the third flag, which is the one that takes that path out where it runs:
 # "Disable dynamic VRAM and use estimate based model loading."
+#
+# CAVEAT, found by a later audit and worth stating rather than burying: on the
+# ROCm build we actually install (torch 2.14.0+rocm7.2) the aimdo path appears
+# to be gated off upstream for rocm_version below (7, 14), so the HostBuffer
+# construction quoted above probably never runs here and this flag is a no-op
+# on the very machine that prompted it. The engine still logs "Dynamic vram
+# disabled with argument" because argparse saw the flag, which is not evidence
+# it changed anything. It is kept because it is correct for a newer ROCm and
+# costs nothing today -- but the fault it was meant to remove was more likely
+# fixed by the allocator setting in environment(), and the reasoning above
+# should not be read as a confirmed diagnosis.
 #
 # The trade is real and worth stating. Estimate-based loading is the older,
 # blunter scheme, and it can misjudge a tight card where the dynamic one would
