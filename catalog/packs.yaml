@@ -28,6 +28,23 @@ packs:
     vram_gb_min: 8          # provisional
     licence: "Apache 2.0 — free for any use, including commercial."
     default_checked: true
+    # UNVERIFIED, and it matters more than anything else here: on a 20 GB
+    # gfx1100 this pack returned a flat, featureless square for every prompt
+    # tried, including a plainly benign one. No error -- a finished image with
+    # nothing in it, which is what a NaN latent decodes to.
+    #
+    # The suspicion is the quantisation this variant is built on. ComfyUI on
+    # that card reports "emulated ops: float8_e5m2, mxfp8, float8_e4m3fn,
+    # nvfp4", and this recipe's text encoder is qwen_3_4b_fp8_mixed -- fp8,
+    # emulated. The bf16 recipe (image_z_image_turbo, 20.8 GB) uses
+    # qwen_3_4b and z_image_turbo_bf16 instead and would sidestep it.
+    #
+    # Not acted on yet because it is one machine and one report. But this is
+    # the pack that is default_checked and called "the best place to start",
+    # and AMD is a fixed constraint (docs/PLAN.md D2), so if it holds up it is
+    # a release blocker rather than a tuning note. Settle it by running the
+    # SDXL pack (plain fp16) on the same card: a real picture there and a blank
+    # one here isolates it to the quantised variant.
 
   - id: image.sdxl
     modality: Pictures
