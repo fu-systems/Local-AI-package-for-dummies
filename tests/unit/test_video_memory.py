@@ -251,3 +251,53 @@ class TestEasyModeUsesThem:
         big = self.page(tmp_path, 24)
         big._on_inspected(analyse(VIDEO_GRAPH))
         assert small.settings().width < big.settings().width
+
+
+class TestSwitchingWorkflowsCannotLeakTheLastOne:
+    """The window between picking a workflow and the engine answering.
+
+    _on_recipe_changed used to zero the size boxes, start an asynchronous
+    inspection, and leave both _is_video and the button alone. Switching from a
+    picture pack to the video pack and pressing Make it inside that window sent
+    no length at all, so the template's own 1280x704x121 ran on whatever card
+    was fitted -- the exact thing the presets exist to prevent.
+    """
+
+    def page_with(self, tmp_path, recipes):
+        from toolshed.ui.make import MakePage
+
+        page = MakePage(tmp_path, vram_gb=20)
+        page.recipes = recipes
+        page.client = None
+        return page
+
+    def test_the_button_is_disabled_while_the_answer_is_outstanding(self, qapp, tmp_path):
+        page = self.page_with(tmp_path, [])
+        page._inspecting = True
+        page._sync()
+        assert not page.go.isEnabled()
+
+    def test_the_previous_workflows_answers_are_dropped_immediately(self, qapp, tmp_path):
+        page = self.page_with(tmp_path, [])
+        page._on_inspected(analyse(VIDEO_GRAPH))
+        assert page._is_video and page.knobs is not None
+
+        # Now the user picks something else. No engine here, so inspect()
+        # returns without starting a worker -- exactly the case where stale
+        # state would otherwise survive.
+        page._on_recipe_changed()
+        assert not page._is_video, "a stale video flag sends a length to a picture graph"
+        assert page.knobs is None
+        assert page.current_video_preset() is None
+
+    def test_a_failed_inspection_gives_the_button_back(self, qapp, tmp_path):
+        """An un-inspected workflow can still be run exactly as it shipped, so
+        a failure must not leave the screen permanently dead."""
+        from toolshed.ui.make import Recipe
+
+        page = self.page_with(tmp_path, [Recipe("video.wan22", "v", tmp_path / "w.json")])
+        page.client = object()          # not blocked, so the message survives
+        page._inspecting = True
+        page._on_inspect_failed("could not read this workflow")
+        assert not page._inspecting
+        assert "could not read" in page.status.text()

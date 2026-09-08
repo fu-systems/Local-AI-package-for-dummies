@@ -339,3 +339,30 @@ def test_the_workflows_come_from_the_templates_the_engine_ships():
         f"TEMPLATES_REF to that version, rerun tools/build_workflows.py, then "
         f"move TEMPLATES_VERIFIED_FOR_ENGINE."
     )
+
+
+def test_the_engine_facts_we_read_are_all_pinned_to_the_shipped_tag():
+    """Three constants now record "I read this out of ComfyUI at tag X".
+
+    Two of them had no test, so the guard their own comments promised did not
+    exist: bumping ENGINE_TAG could not fail, and a renamed VAEDecodeTiled
+    input or DynamicCombo io_type would have come back as a silent breakage --
+    which is precisely how the DynamicCombo bug reached three shipped
+    workflows in the first place.
+    """
+    from toolshed.easy.convert import DYNAMIC_COMBO_VERIFIED_AGAINST
+    from toolshed.easy.knobs import DECODE_VERIFIED_AGAINST
+    from toolshed.exec.engine import FLAGS_VERIFIED_AGAINST
+    from toolshed.planner.plan import ENGINE_TAG
+
+    checked = {
+        "engine.FLAGS_VERIFIED_AGAINST (comfy/cli_args.py)": FLAGS_VERIFIED_AGAINST,
+        "knobs.DECODE_VERIFIED_AGAINST (VAEDecodeTiled in nodes.py)": DECODE_VERIFIED_AGAINST,
+        "convert.DYNAMIC_COMBO_VERIFIED_AGAINST (comfy_api/latest/_io.py)":
+            DYNAMIC_COMBO_VERIFIED_AGAINST,
+    }
+    stale = {name: tag for name, tag in checked.items() if tag != ENGINE_TAG}
+    assert not stale, (
+        f"ComfyUI moved to {ENGINE_TAG} but these were last read elsewhere: {stale}. "
+        f"Re-read each source at {ENGINE_TAG} and move the constant with it."
+    )

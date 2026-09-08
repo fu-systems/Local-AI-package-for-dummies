@@ -323,6 +323,11 @@ class MakePage(QtWidgets.QWidget):
         self.vram_gb = vram_gb
         self.video_presets: tuple[VideoPreset, ...] = presets_for(vram_gb)
         self._is_video = False
+        # True while the engine is being asked what this workflow exposes. The
+        # answer decides the video preset, so pressing the button before it
+        # arrives would send the template's own size -- which for video is the
+        # 1280x704x121 the presets exist to avoid.
+        self._inspecting = False
         self.client: ComfyClient | None = None
         self.worker: GenerateWorker | None = None
         self.recipes: list[Recipe] = []
@@ -525,8 +530,16 @@ class MakePage(QtWidgets.QWidget):
         return self.recipes[index] if 0 <= index < len(self.recipes) else None
 
     def _on_recipe_changed(self) -> None:
+        # Cleared first, and unconditionally. Everything below describes the
+        # workflow we are leaving, and it is wrong the moment the selection
+        # moves -- including when it moves to nothing at all.
+        self.knobs = None
+        self._is_video = False
+        self.video_row.setVisible(False)
+
         recipe = self._current()
         if recipe is None:
+            self._sync()
             return
         self.go.setText(recipe.verb)
         self.prompt.setPlaceholderText(
@@ -570,12 +583,22 @@ class MakePage(QtWidgets.QWidget):
         # chosen.
         if self.inspector is not None and self.inspector.isRunning():
             self.inspector.wait(5000)
+        self._inspecting = True
         self.inspector = InspectWorker(self.client, recipe.workflow, self._specs_cache)
         self.inspector.inspected.connect(self._on_inspected)
-        self.inspector.failed.connect(self.status.setText)
+        self.inspector.failed.connect(self._on_inspect_failed)
         self.inspector.start()
+        self._sync()
+
+    def _on_inspect_failed(self, message: str) -> None:
+        """The question failed. Say so, and let the button work again -- an
+        un-inspected workflow can still be run exactly as it shipped."""
+        self._inspecting = False
+        self.status.setText(message)
+        self._sync()
 
     def _on_inspected(self, knobs) -> None:
+        self._inspecting = False
         self.knobs = knobs
 
         # A workflow with no text encoder has nothing to do with a prompt box.
@@ -672,7 +695,8 @@ class MakePage(QtWidgets.QWidget):
 
     def _sync(self) -> None:
         busy = self.worker is not None and self.worker.isRunning()
-        ready = self.client is not None and bool(self.recipes) and not busy
+        ready = (self.client is not None and bool(self.recipes)
+                 and not busy and not self._inspecting)
 
         self.go.setEnabled(ready)
 
@@ -790,6 +814,10 @@ class MakePage(QtWidgets.QWidget):
         self.bar.setVisible(False)
         self.stop_button.setVisible(False)
         self._last = outputs
+        # Cleared before it is set again: left over from a previous run, it
+        # would send "Open the folder" to that run's subfolder -- and create
+        # it -- after a run that saved nothing at all.
+        self._last_saved = None
         self._sync()
 
         if not outputs:

@@ -231,3 +231,122 @@ class TestFindingWhatIsLeft:
 
     def test_an_empty_report_is_not_a_change(self):
         assert not Report().changed
+
+
+class TestARefreezeCannotPairANewCommitWithAnOldHash:
+    """The dangerous failure: revision advances, sha256 does not, and every
+    install then downloads a file that fails verification with a message
+    blaming the user's connection."""
+
+    def frozen(self) -> dict:
+        doc = recipe()
+        freeze_recipe(doc, FakeHF())
+        return doc
+
+    def test_both_move_together_on_a_real_refreeze(self):
+        doc = self.frozen()
+        NEW_SHA, NEW_OID = "c" * 40, "d" * 64
+        report = freeze_recipe(doc, FakeHF(
+            info={"sha": NEW_SHA, "gated": False, "cardData": {"license": "apache-2.0"}},
+            paths=[{"path": "model.safetensors", "lfs": {"oid": NEW_OID, "size": 9}}]))
+        entry = doc["files"]["model"]
+        assert entry["revision"] == NEW_SHA
+        assert entry["sha256"] == NEW_OID, "the hash must come from the same commit"
+        assert not report.problems
+
+    def test_a_moved_commit_with_no_new_hash_clears_both(self):
+        doc = self.frozen()
+        report = freeze_recipe(doc, FakeHF(
+            info={"sha": "c" * 40, "gated": False}, paths=[]))
+        entry = doc["files"]["model"]
+        assert entry["revision"] == PENDING
+        assert entry["sha256"] == PENDING, "an old hash must never survive a new commit"
+        assert entry["size_bytes"] == PENDING
+        assert any("cleared" in p for p in report.problems)
+
+    def test_an_unchanged_commit_is_not_disturbed(self):
+        doc = self.frozen()
+        before = dict(doc["files"]["model"])
+        freeze_recipe(doc, FakeHF())
+        assert doc["files"]["model"] == before
+
+    def test_a_frozen_fact_that_now_reads_differently_is_reported_not_replaced(self):
+        """The tool cannot tell an upstream change from a mistake, so it says
+        so rather than choosing."""
+        doc = self.frozen()
+        report = freeze_recipe(doc, FakeHF(
+            info={"sha": SHA, "gated": False, "cardData": {"license": "mit"}}))
+        assert doc["files"]["model"]["licence"] == "apache-2.0"
+        assert any("already frozen" in p for p in report.problems)
+
+
+class TestRewritingKeepsTheFile:
+    def test_indented_comments_survive(self, tmp_path):
+        """The adult recipe carries 35 lines of indented rationale. A
+        yaml.safe_dump round trip deletes every one of them, and the freeze
+        command is the first thing anyone runs against it."""
+        from freeze_manifest import _rewritten
+
+        text = (
+            "# top comment\n"
+            "id: image.example\n"
+            "estimated_download_bytes: PENDING_FREEZE\n"
+            "files:\n"
+            "  model:\n"
+            "    # why this model and not another\n"
+            "    #   criterion 2: the author's own repo\n"
+            "    repo: someone/some-model\n"
+            "    revision: PENDING_FREEZE\n"
+            "    sha256: PENDING_FREEZE\n"
+        )
+        doc = {"estimated_download_bytes": 7,
+               "files": {"model": {"repo": "someone/some-model",
+                                   "revision": SHA, "sha256": OID}}}
+        out = _rewritten(text, doc)
+        assert "# why this model and not another" in out
+        assert "#   criterion 2: the author's own repo" in out
+        assert "# top comment" in out
+        assert f"    revision: {SHA}" in out
+        assert f"    sha256: {OID}" in out
+        assert "estimated_download_bytes: 7" in out
+
+    def test_the_real_adult_recipe_keeps_its_rationale(self, tmp_path):
+        """Not a synthetic file: the one the documented command targets."""
+        import yaml
+        from freeze_manifest import _rewritten
+
+        from toolshed import resources
+
+        path = (resources.resource_path("catalog") / "recipes"
+                / "image_sdxl_adult.authored.yaml")
+        text = path.read_text(encoding="utf-8")
+        doc = yaml.safe_load(text)
+        doc["files"]["checkpoint"]["revision"] = SHA
+        doc["files"]["checkpoint"]["sha256"] = OID
+        out = _rewritten(text, doc)
+
+        before = [ln for ln in text.splitlines() if ln.strip().startswith("#")]
+        after = [ln for ln in out.splitlines() if ln.strip().startswith("#")]
+        assert before == after, "every comment line must survive a freeze"
+        assert f"    revision: {SHA}" in out
+        assert yaml.safe_load(out)["files"]["checkpoint"]["sha256"] == OID
+
+    def test_booleans_render_as_yaml_not_python(self):
+        from freeze_manifest import _rewritten
+
+        text = "files:\n  m:\n    gated: PENDING_FREEZE\n"
+        out = _rewritten(text, {"files": {"m": {"gated": False}}})
+        assert "gated: false" in out and "False" not in out
+
+
+class TestNamedRecipesWin:
+    def test_check_respects_the_files_it_was_given(self):
+        """Scanning the whole catalogue when someone asked about one file is a
+        small lie that reads as a much bigger answer."""
+        import argparse
+
+        from freeze_manifest import recipe_paths
+
+        args = argparse.Namespace(recipes=["catalog/recipes/one.yaml"],
+                                  all=False, check=True)
+        assert recipe_paths(args) == [Path("catalog/recipes/one.yaml")]
