@@ -13,7 +13,8 @@ explicitly `null` for a graph hand-authored from scratch.
 No workflow here is CC0. An MIT derivative cannot be released into the public
 domain without stripping the notice MIT obliges us to keep.
 
-Adapted from Comfy-Org/workflow_templates:
+Adapted from Comfy-Org/workflow_templates at v0.11.48,
+the version ComfyUI's own requirements.txt pins at the engine tag we ship:
 
   3d/01 Photo to 3D model.json             <- 3d_pixal3d_trellis2_image_to_model
   audio/01 Make music.json                 <- audio_ace_step_1_5_checkpoint

@@ -28,7 +28,29 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CACHE = REPO / ".cache" / "templates"
 OUT = REPO / "workflows"
-RAW = "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/{name}.json"
+# The templates version the engine we pin actually ships. ComfyUI v0.34.0's
+# requirements.txt reads:
+#
+#     comfyui-workflow-templates==0.11.48
+#
+# so that is the tag these graphs come from. Not `main`: a branch lets the
+# graph change under a pinned engine, and then a node's schema and the widget
+# values we ship for it disagree with nothing saying so -- the user sees
+# "Required input is missing" on a workflow that has never been edited.
+#
+# derive_catalog.py already refuses a branch for exactly this reason
+# ("Recipes pin an immutable commit, never a branch"). This file was the one
+# place still reading a moving target.
+#
+# Raising ENGINE_TAG means re-reading requirements.txt at the new tag and
+# moving this with it; tests/unit/test_repo_layout.py fails until you do.
+TEMPLATES_REF = "v0.11.48"
+# The engine tag whose requirements.txt named that version. Same guard as
+# engine.FLAGS_VERIFIED_AGAINST: raising ENGINE_TAG fails a test until someone
+# has re-read the pin and moved this to match.
+TEMPLATES_VERIFIED_FOR_ENGINE = "v0.34.0"
+RAW = ("https://raw.githubusercontent.com/Comfy-Org/workflow_templates/"
+       "{ref}/templates/{name}.json")
 
 # The note's look. Matches the colours the official templates already use, so
 # it does not read as a foreign object bolted onto the graph.
@@ -100,10 +122,10 @@ FOOTER = (
 
 
 def fetch(name: str, refresh: bool) -> dict:
-    path = CACHE / "main" / f"{name}.json"
+    path = CACHE / TEMPLATES_REF / f"{name}.json"
     if path.is_file() and not refresh:
         return json.loads(path.read_text(encoding="utf-8"))
-    url = RAW.format(name=name)
+    url = RAW.format(ref=TEMPLATES_REF, name=name)
     try:
         with urllib.request.urlopen(url, timeout=60) as response:
             body = response.read().decode("utf-8")
@@ -167,7 +189,8 @@ def main() -> int:
 
     notice = OUT / "NOTICE"
     lines = notice.read_text(encoding="utf-8").split("Adapted from")[0].rstrip()
-    lines += "\n\nAdapted from Comfy-Org/workflow_templates:\n\n"
+    lines += (f"\n\nAdapted from Comfy-Org/workflow_templates at {TEMPLATES_REF},\n"
+              f"the version ComfyUI's own requirements.txt pins at the engine tag we ship:\n\n")
     width = max(len(rel) for rel, _ in provenance)
     for rel, template in sorted(provenance):
         lines += f"  {rel.ljust(width)}  <- {template}\n"

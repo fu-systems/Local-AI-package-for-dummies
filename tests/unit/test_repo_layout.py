@@ -306,3 +306,36 @@ def test_the_engine_flags_were_verified_against_the_engine_we_ship():
         f"confirm --disable-async-offload and --disable-pinned-memory are still "
         f"spelt that way, then update FLAGS_VERIFIED_AGAINST."
     )
+
+
+def test_the_workflows_come_from_the_templates_the_engine_ships():
+    """The graphs we inject must match the node schemas the engine has.
+
+    They did not have to be pinned to notice this: a 3D run reported
+    "Required input is missing: qef" on RemeshMesh, a node whose inputs vary by
+    a DynamicCombo branch. The workflow turned out to be identical to the
+    pinned template, so that particular failure was upstream's -- but the file
+    that built it was reading `main` while the engine sat at a fixed tag, and a
+    graph fetched from a moving branch is one upstream edit away from exactly
+    that error, with nothing anywhere connecting the two.
+
+    derive_catalog.py already refuses a branch for recipes. This is the same
+    rule for the workflows those recipes ship.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    try:
+        from build_workflows import TEMPLATES_REF, TEMPLATES_VERIFIED_FOR_ENGINE
+    finally:
+        sys.path.pop(0)
+    from toolshed.planner.plan import ENGINE_TAG
+
+    assert not TEMPLATES_REF.endswith("main"), "a branch lets the graph move under a pinned engine"
+    assert TEMPLATES_VERIFIED_FOR_ENGINE == ENGINE_TAG, (
+        f"ComfyUI moved to {ENGINE_TAG} but the workflow templates were last "
+        f"pinned for {TEMPLATES_VERIFIED_FOR_ENGINE}. Read "
+        f"comfyui-workflow-templates in requirements.txt at {ENGINE_TAG}, set "
+        f"TEMPLATES_REF to that version, rerun tools/build_workflows.py, then "
+        f"move TEMPLATES_VERIFIED_FOR_ENGINE."
+    )
