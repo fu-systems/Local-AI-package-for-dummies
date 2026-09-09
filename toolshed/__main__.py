@@ -68,12 +68,32 @@ def selftest(report_path: Path | None = None) -> int:
     from toolshed.catalog.packs import load_packs  # noqa: PLC0415
 
     packs = load_packs()
-    sized = [p for p in packs if p.download_bytes is not None]
-    lines.append(f"packs:           {len(packs)} ({len(sized)} with a derived size)")
+    missing = [p.id for p in packs if not p.recipe_found]
+    unfrozen = [p.id for p in packs if not p.is_frozen]
+    frozen = [p for p in packs if p.is_frozen]
+    lines.append(f"packs:           {len(packs)} "
+                 f"({len(frozen)} frozen, {len(unfrozen)} awaiting freeze)")
+    if unfrozen:
+        lines.append(f"awaiting freeze: {', '.join(unfrozen)}")
     if not packs:
         failures.append("no packs in the bundle; the choose screen would be blank")
-    if len(sized) != len(packs):
-        failures.append("some packs have no size; packs.yaml points at a missing recipe")
+
+    # A missing recipe file is a typo in `recipe:` and must fail the build. A
+    # recipe that exists but still carries PENDING_FREEZE is a different and
+    # legitimate state: the pack ships, greyed out, saying so on the choose
+    # screen. This used to be one check reading the download size, which
+    # conflated the two -- so the first deliberately unfrozen pack failed the
+    # build with a message blaming a missing recipe that was sitting in the
+    # bundle all along. tests/unit/test_packs.py separated them for the
+    # catalogue loader; this is the same separation, here.
+    if missing:
+        failures.append(f"packs.yaml points at no such recipe: {', '.join(missing)}")
+    # Worth keeping from the old check: if the data files were bundled empty or
+    # truncated, every size would vanish while the files themselves still
+    # existed, and nothing above would notice. A build where nothing at all can
+    # be installed is not a usable binary.
+    if packs and not frozen:
+        failures.append("no pack has a download size; the bundled recipes are unusable")
 
     from toolshed.hw import detect, verdict_for  # noqa: PLC0415
 
