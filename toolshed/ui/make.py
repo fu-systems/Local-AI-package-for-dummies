@@ -42,6 +42,7 @@ VERB = {
     "image.sdxl": "Make a picture",
     "image.qwen_edit": "Change the picture",
     "video.wan22": "Make a video",
+    "video.wan22_14b": "Make a video",
     "audio.acestep": "Make music",
     "model3d.trellis2": "Make a 3D model",
 }
@@ -51,6 +52,7 @@ PLACEHOLDER = {
     "image.sdxl": "a lighthouse in a storm, painted in thick oils",
     "image.qwen_edit": "make it night time, with the windows lit",
     "video.wan22": "a paper boat drifting down a rain-filled gutter",
+    "video.wan22_14b": "a paper boat drifting down a rain-filled gutter",
     "audio.acestep": "slow piano, warm tape hiss, rain outside",
     "model3d.trellis2": "",
 }

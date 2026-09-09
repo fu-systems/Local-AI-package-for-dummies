@@ -87,6 +87,43 @@ packs:
     licence: "Apache 2.0 — free for any use, including commercial."
     default_checked: false
 
+  - id: video.wan22_14b
+    modality: Video
+    name: "Make short videos (big model)"
+    blurb: "The much larger 14B model. Better looking video, a 38 GB download, and it needs
+            layer streaming switched on to run on a normal graphics card."
+    recipe: video_wan2_2_14B_t2v
+    vram_gb_min: 8          # provisional -- see the note below, this is not the real limit
+    licence: "Apache 2.0 — free for any use, including commercial."
+    default_checked: false
+    # Added because layer streaming changed what is reachable. The earlier
+    # judgement -- that 14B was out because the catalogue sits on an 8 GB VRAM
+    # floor -- was reasoning from a constraint that no longer holds: with
+    # --novram almost no weights stay resident, so the card stops being the
+    # thing that decides.
+    #
+    # Everything in it is Comfy Org's own repackage, derived from the official
+    # video_wan2_2_14B_t2v template. Nothing community, nothing hand-picked:
+    #
+    #   wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors  diffusion_models
+    #   wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors   diffusion_models
+    #   umt5_xxl_fp8_e4m3fn_scaled.safetensors            text_encoders
+    #   wan_2.1_vae.safetensors                           vae
+    #   wan2.2_t2v_lightx2v_4steps_lora_v1.1_{high,low}_noise.safetensors  loras
+    #
+    # Three things make it more plausible on a 20 GB card than the raw size
+    # suggests. The experts are fp8_scaled rather than bf16. The high-noise and
+    # low-noise experts run in sequence, not together, so the peak is one of
+    # them. And the two Lightning LoRAs cut sampling to four steps, which is
+    # what makes streaming affordable -- the weights cross the bus four times
+    # rather than twenty.
+    #
+    # The floor above is provisional and probably the wrong axis. With
+    # streaming the binding constraint is SYSTEM RAM, not VRAM, and the machine
+    # that prompted this has 31 GB. Nobody has measured it yet. Measure before
+    # trusting the number, and the honest floor may need to be a RAM floor,
+    # which the schema does not currently have.
+
   - id: audio.acestep
     modality: Music
     name: "Make music"

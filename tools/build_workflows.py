@@ -92,6 +92,19 @@ WORKFLOWS: list[tuple[str, str, str, str]] = [
         "the progress bar is moving even when it looks stuck.",
     ),
     (
+        "video_wan2_2_14B_t2v",
+        "video/02 Make a video (big model).json",
+        "Make a video with the big model",
+        "The same idea as the first video workflow, using the much larger 14B "
+        "model. It looks considerably better and it is a 38 GB download.\n\n"
+        "**This will not fit on most graphics cards on its own.** Turn on "
+        "**Stream model layers into the card** on the Toolshed launch screen "
+        "before running it. The two speed-up LoRAs mean only four sampling "
+        "steps, so streaming costs far less here than it would on a twenty-step "
+        "job.\n\n"
+        "Describe the shot you want and press **Run**.",
+    ),
+    (
         "audio_ace_step_1_5_checkpoint",
         "audio/01 Make music.json",
         "Make music",

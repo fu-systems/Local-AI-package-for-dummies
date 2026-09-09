@@ -68,6 +68,9 @@ V1_TEMPLATES = {
     "image_sdxl_simple":              "image.sdxl",
     "image_qwen_image_edit_2511_int8": "image.qwen_edit",
     "video_wan2_2_5B_ti2v":           "video.wan22_5b",
+    # The big one. Only reachable on a 20 GB card with layer streaming
+    # switched on, which is why it was not here before that existed.
+    "video_wan2_2_14B_t2v":           "video.wan22_14b",
     "audio_ace_step_1_5_checkpoint":  "audio.acestep",
     "3d_pixal3d_trellis2_image_to_model": "model3d.trellis2",
 }
