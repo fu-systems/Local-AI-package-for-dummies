@@ -200,8 +200,9 @@ AMD_SAFEGUARDS = (
 #                      issues with some workflows", and non-blocking transfers
 #                      are the wrong direction on a card already faulting on
 #                      host memory.
-#   --novram           mutually exclusive with --lowvram, and a bigger hammer
-#                      than we should reach for unattended.
+#   --novram           NOT excluded any more -- it has its own switch below.
+#                      An earlier version of this comment dismissed it as "a
+#                      bigger hammer", which missed what it actually does.
 #
 # Each option names the flags argparse treats as mutually exclusive with it.
 # Passing two members of one group makes argparse exit before the server
@@ -242,8 +243,75 @@ def choose_low_memory(engine_dir: Path, *, enabled: bool,
     return Safeguards(tuple(applied), tuple(unavailable), tuple(overridden))
 
 
+# --------------------------------------------------------------------------
+# Layer streaming
+# --------------------------------------------------------------------------
+#
+# The other kind of "sequential", and the one people actually mean. Low memory
+# mode above moves whole MODELS off the card between steps. This streams the
+# weights of a single model into the card a block at a time, so a model larger
+# than the card can still run.
+#
+# ComfyUI has this, and at v0.34.0 the switch is --novram. Traced through
+# comfy/model_management.py:
+#
+#     args.novram             -> set_vram_to = VRAMState.NO_VRAM   (~line 560)
+#     vram_state == NO_VRAM   -> lowvram_model_memory = 0.1        (~line 1001)
+#     model_load(0.1)         -> model_use_more_vram(0.1)
+#                             -> partially_load(...)
+#
+# That 0.1 is a byte budget for resident weights: essentially none of the model
+# is kept on the card, and each block is brought over as the forward pass
+# reaches it. It is per-layer streaming, not per-model offload.
+#
+# Two consequences worth knowing rather than discovering:
+#
+# * enables_dynamic_vram() in cli_args.py is false when --novram is given, so
+#   this deliberately takes the estimate-based path. The two are alternative
+#   mechanisms for the same job, not layers of one.
+# * NO_VRAM also satisfies the DISABLE_SMART_MEMORY branch at model_management
+#   line 1091, so aggressive unloading comes along with it.
+#
+# It is slow, and honestly so: every block crosses the PCIe bus on every step,
+# so a twenty-step sample moves the model twenty times. That is the trade being
+# asked for, and it is the difference between a job that takes longer and a job
+# that cannot run at all.
+LAYER_STREAMING = Safeguard(
+    "--novram", "novram",
+    "keeping any of the model on the card between blocks")
+
+
+def choose_layer_streaming(engine_dir: Path, *, enabled: bool,
+                           extra: Sequence[str] = ()) -> Safeguards:
+    """Whether to stream model layers, if this engine still takes the flag."""
+    if not enabled:
+        return Safeguards()
+    if set(extra).intersection(VRAM_GROUP):
+        return Safeguards(overridden=(LAYER_STREAMING,))
+    if engine_understands(engine_dir, LAYER_STREAMING.flag):
+        return Safeguards(applied=(LAYER_STREAMING,))
+    return Safeguards(unavailable=(LAYER_STREAMING,))
+
+
 def low_memory_file(root: Path) -> Path:
     return root / "state" / "low-memory"
+
+
+def layer_streaming_file(root: Path) -> Path:
+    return root / "state" / "layer-streaming"
+
+
+def read_layer_streaming(root: Path) -> bool:
+    return layer_streaming_file(root).is_file()
+
+
+def write_layer_streaming(root: Path, enabled: bool) -> None:
+    path = layer_streaming_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if enabled:
+        path.write_text("on\n", encoding="utf-8")
+    elif path.exists():
+        path.unlink()
 
 
 def read_low_memory(root: Path) -> bool:

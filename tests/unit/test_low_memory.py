@@ -31,8 +31,11 @@ from toolshed.exec.engine import (
     CACHE_GROUP,
     LOW_MEMORY_OPTIONS,
     VRAM_GROUP,
+    choose_layer_streaming,
     choose_low_memory,
+    read_layer_streaming,
     read_low_memory,
+    write_layer_streaming,
     write_low_memory,
 )
 
@@ -78,10 +81,17 @@ class TestItNeverPassesTheHarmfulAdvice:
     would make things worse on the card that prompted the request."""
 
     @pytest.mark.parametrize("flag", ["--async-offload", "--reserve-vram",
-                                      "--force-non-blocking", "--novram"])
+                                      "--force-non-blocking"])
     def test_the_excluded_flags_stay_excluded(self, tmp_path, flag):
         got = choose_low_memory(engine_tree(tmp_path), enabled=True)
         assert flag not in got.flags
+
+    def test_low_memory_alone_does_not_stream_layers(self, tmp_path):
+        """--novram is a separate, louder choice with its own switch. Turning
+        it on as a side effect of "use less memory" would make every job on a
+        card that was coping suddenly crawl."""
+        got = choose_low_memory(engine_tree(tmp_path), enabled=True)
+        assert "--novram" not in got.flags
 
     def test_it_does_not_undo_a_safeguard(self, tmp_path):
         """The safeguards exist because of an observed crash. A memory setting
@@ -141,3 +151,76 @@ class TestItIsRemembered:
         write_low_memory(tmp_path, False)
         write_low_memory(tmp_path, False)
         assert not read_low_memory(tmp_path)
+
+
+class TestStreamingModelLayers:
+    """The demand this was built for: not moving whole models off the card
+    between steps, but streaming ONE model's weights in a block at a time, so a
+    model larger than the card still runs.
+
+    At v0.34.0 that is --novram, traced through comfy/model_management.py:
+    args.novram sets VRAMState.NO_VRAM, NO_VRAM forces lowvram_model_memory to
+    0.1, and that byte budget is what model_load passes to partially_load. An
+    earlier version of this file asserted --novram must never be passed, on the
+    grounds that it was too blunt. That was the wrong call and it is reversed.
+    """
+
+    def test_off_by_default(self, tmp_path):
+        assert choose_layer_streaming(engine_tree(tmp_path), enabled=False).flags == []
+
+    def test_on_it_passes_novram(self, tmp_path):
+        got = choose_layer_streaming(engine_tree(tmp_path), enabled=True)
+        assert got.flags == ["--novram"]
+
+    def test_an_engine_without_it_says_so(self, tmp_path):
+        engine = engine_tree(tmp_path, 'parser.add_argument("--listen")\n')
+        got = choose_layer_streaming(engine, enabled=True)
+        assert got.flags == []
+        assert [o.flag for o in got.unavailable] == ["--novram"]
+
+    @pytest.mark.parametrize("flag", VRAM_GROUP)
+    def test_a_memory_mode_the_user_typed_wins(self, tmp_path, flag):
+        """Every member of the group, because passing two stops ComfyUI
+        starting -- and that is a worse outcome than not streaming."""
+        got = choose_layer_streaming(engine_tree(tmp_path), enabled=True, extra=[flag])
+        assert got.flags == []
+        assert [o.flag for o in got.overridden] == ["--novram"]
+
+    def test_it_is_remembered(self, tmp_path):
+        assert not read_layer_streaming(tmp_path)
+        write_layer_streaming(tmp_path, True)
+        assert read_layer_streaming(tmp_path)
+        write_layer_streaming(tmp_path, False)
+        assert not read_layer_streaming(tmp_path)
+
+
+class TestTheTwoSwitchesTogether:
+    """--novram and --lowvram are members of one argparse group. Both switched
+    on must not produce both flags, or ComfyUI exits before the server starts."""
+
+    def both(self, tmp_path, extra=()):
+        engine = engine_tree(tmp_path)
+        streaming = choose_layer_streaming(engine, enabled=True, extra=list(extra))
+        thrift = choose_low_memory(engine, enabled=True,
+                                   extra=[*extra, *streaming.flags])
+        return [*streaming.flags, *thrift.flags]
+
+    def test_streaming_wins_and_lowvram_stands_down(self, tmp_path):
+        flags = self.both(tmp_path)
+        assert "--novram" in flags
+        assert "--lowvram" not in flags
+
+    def test_at_most_one_member_of_the_vram_group_is_ever_passed(self, tmp_path):
+        flags = self.both(tmp_path)
+        assert len([f for f in flags if f in VRAM_GROUP]) <= 1
+
+    def test_the_rest_of_low_memory_mode_still_applies(self, tmp_path):
+        """Standing --lowvram down must not throw away the other two."""
+        flags = self.both(tmp_path)
+        assert "--disable-smart-memory" in flags
+        assert "--cache-none" in flags
+
+    def test_a_typed_choice_still_beats_both(self, tmp_path):
+        flags = self.both(tmp_path, extra=["--highvram"])
+        assert not [f for f in flags if f in VRAM_GROUP]
+        assert "--disable-smart-memory" in flags

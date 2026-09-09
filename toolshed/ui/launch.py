@@ -24,12 +24,15 @@ from toolshed.exec.engine import (
     Engine,
     EngineError,
     Layout,
+    choose_layer_streaming,
     choose_low_memory,
     choose_safeguards,
     open_in_browser,
     read_extra_flags,
+    read_layer_streaming,
     read_low_memory,
     write_extra_flags,
+    write_layer_streaming,
     write_low_memory,
 )
 
@@ -180,6 +183,21 @@ class LaunchPage(QtWidgets.QWidget):
             "Turn this on if a job dies part-way through saying it ran out of "
             "memory. It does not help with a graphics driver fault, which is a "
             "different failure and already handled."))
+
+        # The stronger, different thing: streaming one model's weights into the
+        # card a block at a time, so a model bigger than the card still runs.
+        self.layer_streaming = QtWidgets.QCheckBox(
+            "Stream model layers into the card (much slower, lowest memory)")
+        self.layer_streaming.setChecked(read_layer_streaming(self.root))
+        self.layer_streaming.setToolTip(
+            "Keeps almost none of the model on the graphics card, fetching each "
+            "block from main memory as it is needed. A model far larger than "
+            "your card can run this way.")
+        flags_layout.addWidget(self.layer_streaming)
+        flags_layout.addWidget(QtWidgets.QLabel(
+            "This is the last resort, and it is genuinely slow: every block "
+            "crosses to the card on every step, so a twenty-step picture moves "
+            "the model twenty times. Use it when something will not run at all."))
         layout.addWidget(self.flags_box)
 
         self.log = QtWidgets.QPlainTextEdit()
@@ -230,6 +248,7 @@ class LaunchPage(QtWidgets.QWidget):
         typed = self.flags.text().strip()
         write_extra_flags(self.root, typed)
         write_low_memory(self.root, self.low_memory.isChecked())
+        write_layer_streaming(self.root, self.layer_streaming.isChecked())
         extra = read_extra_flags(self.root)
         manifest = Manifest.load(self.root)
         if env is None:
@@ -262,10 +281,32 @@ class LaunchPage(QtWidgets.QWidget):
                 f"AMD cards at the moment a large model is swapped out. If a long "
                 f"job dies partway through, this is the first thing to suspect.")
 
-        # After the safeguards, before the user's own options: a low-memory
-        # choice is ours to make, and anything typed still has the last word.
-        thrift = choose_low_memory(Layout(self.root).engine_dir,
-                                   enabled=self.low_memory.isChecked(), extra=extra)
+        # Layer streaming first, because --novram and --lowvram are members of
+        # the same argparse group: passing both stops ComfyUI starting. Its
+        # chosen flags are handed to low memory mode as though the user had
+        # typed them, so the existing group logic stands the weaker one down
+        # rather than a second rule having to know about the first.
+        engine_dir = Layout(self.root).engine_dir
+        streaming = choose_layer_streaming(
+            engine_dir, enabled=self.layer_streaming.isChecked(), extra=extra)
+        if streaming.applied:
+            self.log.appendPlainText(
+                "Streaming model layers: --novram. Almost none of the model stays "
+                "on the card; each block is fetched as it is needed. This is much "
+                "slower and it is what lets a model bigger than the card run.")
+        for option in streaming.overridden:
+            self.log.appendPlainText(
+                f"Layer streaming is standing aside: you have already chosen a "
+                f"memory mode in Extra ComfyUI options, and {option.flag} alongside "
+                f"it would stop ComfyUI starting.")
+        for option in streaming.unavailable:
+            self.log.appendPlainText(
+                f"Warning: this version of ComfyUI does not accept {option.flag}, "
+                f"so layer streaming is not available.")
+
+        thrift = choose_low_memory(engine_dir,
+                                   enabled=self.low_memory.isChecked(),
+                                   extra=[*extra, *streaming.flags])
         if thrift.applied:
             self.log.appendPlainText(
                 "Low memory mode: " + ", ".join(g.flag for g in thrift.applied)
@@ -282,7 +323,7 @@ class LaunchPage(QtWidgets.QWidget):
                 f"so low memory mode is doing less than it says.")
 
         self.engine = Engine(root=self.root, env=env, extra_args=extra,
-                             safe_args=[*guards.flags, *thrift.flags])
+                             safe_args=[*guards.flags, *streaming.flags, *thrift.flags])
 
         # Say the memory setting out loud. ComfyUI's own error report prints
         # the command line but not the environment, so when someone sends a
