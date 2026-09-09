@@ -27,6 +27,7 @@ PACK_FOLDERS: dict[str, tuple[str, ...]] = {
     "image.sdxl": ("image/02 Text to picture (SDXL).json",),
     "image.qwen_edit": ("image/03 Edit a picture.json",),
     "video.wan22": ("video/01 Text or picture to video.json",),
+    "video.wan22_14b": ("video/02 Make a video (big model).json",),
     "audio.acestep": ("audio/01 Make music.json",),
     "model3d.trellis2": ("3d/01 Photo to 3D model.json",),
 }

@@ -193,8 +193,17 @@ ALL_WORKFLOWS = sorted(p.relative_to(WORKFLOWS).as_posix() for p in WORKFLOWS.rg
 
 
 class TestEveryShippedWorkflow:
-    def test_there_are_six_of_them(self):
-        assert len(ALL_WORKFLOWS) == 6, ALL_WORKFLOWS
+    def test_every_pack_that_claims_a_workflow_has_one(self):
+        """A count was easier to write and said less. What matters is that
+        PACK_FOLDERS and the files on disk agree: a pack naming a workflow that
+        is not shipped is offered and then fails on click, and a workflow no
+        pack names is dead weight in the bundle."""
+        from toolshed.exec.inject import PACK_FOLDERS
+
+        claimed = {rel for rels in PACK_FOLDERS.values() for rel in rels}
+        shipped = set(ALL_WORKFLOWS)
+        assert claimed - shipped == set(), f"packs name missing workflows: {claimed - shipped}"
+        assert shipped - claimed == set(), f"workflows no pack names: {shipped - claimed}"
 
     @pytest.mark.parametrize("rel", ALL_WORKFLOWS)
     def test_it_converts_into_a_self_consistent_graph(self, rel):
