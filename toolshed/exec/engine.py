@@ -164,6 +164,101 @@ AMD_SAFEGUARDS = (
 )
 
 
+# --------------------------------------------------------------------------
+# Low memory mode
+# --------------------------------------------------------------------------
+#
+# For the card that cannot hold everything at once. Every flag below was read
+# from comfy/cli_args.py at the tag we ship, and the ones NOT here matter as
+# much as the ones that are:
+#
+#   --lowvram          "Doesn't do anything if dynamic vram is enabled. If
+#                      dynamic vram isn't being used this option makes the text
+#                      encoders run on the CPU." It does NOT stream a diffusion
+#                      model layer by layer, whatever the internet says. It is
+#                      included because we already pass --disable-dynamic-vram
+#                      on AMD, which is exactly the condition that makes it do
+#                      something -- a text encoder off the card is real room.
+#   --cache-none       "Reduced RAM/VRAM usage at the expense of executing
+#                      every node for each run."
+#   --disable-smart-memory
+#                      "Force ComfyUI to agressively offload to regular ram
+#                      instead of keeping models in vram when it can." This is
+#                      the one that matters for a workflow chaining several
+#                      models, like the 3D pack's six.
+#
+# Deliberately NOT included, and each for a reason:
+#
+#   --async-offload N  the exact path AMD_SAFEGUARDS turns off. Switching it
+#                      back on to save memory reintroduces the fault that
+#                      killed two finished jobs.
+#   --reserve-vram N   withholds memory FROM ComfyUI. The Linux default is
+#                      0.4 GB; setting 2.0 makes an out-of-memory more likely,
+#                      not less.
+#   --force-non-blocking
+#                      a performance option whose own help says it "can cause
+#                      issues with some workflows", and non-blocking transfers
+#                      are the wrong direction on a card already faulting on
+#                      host memory.
+#   --novram           mutually exclusive with --lowvram, and a bigger hammer
+#                      than we should reach for unattended.
+#
+# Each option names the flags argparse treats as mutually exclusive with it.
+# Passing two members of one group makes argparse exit before the server
+# starts, which turns "slow" into "never starts" -- so if the user has already
+# chosen from a group in Extra ComfyUI options, we add nothing from it.
+VRAM_GROUP = ("--gpu-only", "--highvram", "--lowvram", "--novram", "--cpu")
+CACHE_GROUP = ("--cache-ram", "--cache-classic", "--cache-lru", "--cache-none",
+               "--high-ram")
+
+LOW_MEMORY_OPTIONS = (
+    Safeguard("--disable-smart-memory", "smart-memory",
+              "keeping models on the card between steps"),
+    Safeguard("--lowvram", "lowvram",
+              "running the text encoder on the graphics card"),
+    Safeguard("--cache-none", "cache-none",
+              "keeping finished steps in memory in case they are reused"),
+)
+
+# Which mutually exclusive group each of the above belongs to, if any.
+_GROUPS = {"--lowvram": VRAM_GROUP, "--cache-none": CACHE_GROUP}
+
+
+def choose_low_memory(engine_dir: Path, *, enabled: bool,
+                      extra: Sequence[str] = ()) -> Safeguards:
+    """The low-memory options this engine will accept, if it is switched on."""
+    if not enabled:
+        return Safeguards()
+    typed = set(extra)
+    applied, unavailable, overridden = [], [], []
+    for option in LOW_MEMORY_OPTIONS:
+        group = _GROUPS.get(option.flag, (option.flag,))
+        if typed.intersection(group):
+            overridden.append(option)     # the user has chosen from this group
+        elif engine_understands(engine_dir, option.flag):
+            applied.append(option)
+        else:
+            unavailable.append(option)
+    return Safeguards(tuple(applied), tuple(unavailable), tuple(overridden))
+
+
+def low_memory_file(root: Path) -> Path:
+    return root / "state" / "low-memory"
+
+
+def read_low_memory(root: Path) -> bool:
+    return low_memory_file(root).is_file()
+
+
+def write_low_memory(root: Path, enabled: bool) -> None:
+    path = low_memory_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if enabled:
+        path.write_text("on\n", encoding="utf-8")
+    elif path.exists():
+        path.unlink()
+
+
 # The tag whose cli_args.py these flags were read from. An engine that renames
 # one is handled safely -- engine_understands drops it rather than producing a
 # command line ComfyUI refuses -- but *safely* is not the same as *silently*,

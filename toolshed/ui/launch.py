@@ -24,10 +24,13 @@ from toolshed.exec.engine import (
     Engine,
     EngineError,
     Layout,
+    choose_low_memory,
     choose_safeguards,
     open_in_browser,
     read_extra_flags,
+    read_low_memory,
     write_extra_flags,
+    write_low_memory,
 )
 
 
@@ -160,6 +163,23 @@ class LaunchPage(QtWidgets.QWidget):
             "Others: --fp32-vae or --cpu-vae if a model will not run on your card, "
             "--reserve-vram 2 to leave room for your desktop."))
         flags_layout.addWidget(self.flags)
+
+        # The one memory setting worth a switch rather than a typed flag. It
+        # is checkable because it really is a switch: what it turns on is a
+        # fixed, verified set, and what that set is deliberately excludes the
+        # things people are usually told to try -- see LOW_MEMORY_OPTIONS.
+        self.low_memory = QtWidgets.QCheckBox(
+            "Use less graphics memory (slower)")
+        self.low_memory.setChecked(read_low_memory(self.root))
+        self.low_memory.setToolTip(
+            "Puts each model back into main memory as soon as it is done, runs "
+            "the text encoder on the processor, and keeps nothing between runs. "
+            "Everything takes longer and much more of it fits.")
+        flags_layout.addWidget(self.low_memory)
+        flags_layout.addWidget(QtWidgets.QLabel(
+            "Turn this on if a job dies part-way through saying it ran out of "
+            "memory. It does not help with a graphics driver fault, which is a "
+            "different failure and already handled."))
         layout.addWidget(self.flags_box)
 
         self.log = QtWidgets.QPlainTextEdit()
@@ -209,6 +229,7 @@ class LaunchPage(QtWidgets.QWidget):
 
         typed = self.flags.text().strip()
         write_extra_flags(self.root, typed)
+        write_low_memory(self.root, self.low_memory.isChecked())
         extra = read_extra_flags(self.root)
         manifest = Manifest.load(self.root)
         if env is None:
@@ -241,8 +262,27 @@ class LaunchPage(QtWidgets.QWidget):
                 f"AMD cards at the moment a large model is swapped out. If a long "
                 f"job dies partway through, this is the first thing to suspect.")
 
+        # After the safeguards, before the user's own options: a low-memory
+        # choice is ours to make, and anything typed still has the last word.
+        thrift = choose_low_memory(Layout(self.root).engine_dir,
+                                   enabled=self.low_memory.isChecked(), extra=extra)
+        if thrift.applied:
+            self.log.appendPlainText(
+                "Low memory mode: " + ", ".join(g.flag for g in thrift.applied)
+                + ". That switches off " + "; ".join(g.plain_english for g in thrift.applied)
+                + ". Everything will be slower and much more of it will fit.")
+        for option in thrift.overridden:
+            self.log.appendPlainText(
+                f"Low memory mode is leaving {option.flag} alone: you have already "
+                f"chosen from that group in Extra ComfyUI options, and passing two "
+                f"would stop ComfyUI starting.")
+        for option in thrift.unavailable:
+            self.log.appendPlainText(
+                f"Warning: this version of ComfyUI does not accept {option.flag}, "
+                f"so low memory mode is doing less than it says.")
+
         self.engine = Engine(root=self.root, env=env, extra_args=extra,
-                             safe_args=guards.flags)
+                             safe_args=[*guards.flags, *thrift.flags])
 
         # Say the memory setting out loud. ComfyUI's own error report prints
         # the command line but not the environment, so when someone sends a
