@@ -164,6 +164,169 @@ AMD_SAFEGUARDS = (
 )
 
 
+# --------------------------------------------------------------------------
+# Low memory mode
+# --------------------------------------------------------------------------
+#
+# For the card that cannot hold everything at once. Every flag below was read
+# from comfy/cli_args.py at the tag we ship, and the ones NOT here matter as
+# much as the ones that are:
+#
+#   --lowvram          "Doesn't do anything if dynamic vram is enabled. If
+#                      dynamic vram isn't being used this option makes the text
+#                      encoders run on the CPU." It does NOT stream a diffusion
+#                      model layer by layer, whatever the internet says. It is
+#                      included because we already pass --disable-dynamic-vram
+#                      on AMD, which is exactly the condition that makes it do
+#                      something -- a text encoder off the card is real room.
+#   --cache-none       "Reduced RAM/VRAM usage at the expense of executing
+#                      every node for each run."
+#   --disable-smart-memory
+#                      "Force ComfyUI to agressively offload to regular ram
+#                      instead of keeping models in vram when it can." This is
+#                      the one that matters for a workflow chaining several
+#                      models, like the 3D pack's six.
+#
+# Deliberately NOT included, and each for a reason:
+#
+#   --async-offload N  the exact path AMD_SAFEGUARDS turns off. Switching it
+#                      back on to save memory reintroduces the fault that
+#                      killed two finished jobs.
+#   --reserve-vram N   withholds memory FROM ComfyUI. The Linux default is
+#                      0.4 GB; setting 2.0 makes an out-of-memory more likely,
+#                      not less.
+#   --force-non-blocking
+#                      a performance option whose own help says it "can cause
+#                      issues with some workflows", and non-blocking transfers
+#                      are the wrong direction on a card already faulting on
+#                      host memory.
+#   --novram           NOT excluded any more -- it has its own switch below.
+#                      An earlier version of this comment dismissed it as "a
+#                      bigger hammer", which missed what it actually does.
+#
+# Each option names the flags argparse treats as mutually exclusive with it.
+# Passing two members of one group makes argparse exit before the server
+# starts, which turns "slow" into "never starts" -- so if the user has already
+# chosen from a group in Extra ComfyUI options, we add nothing from it.
+VRAM_GROUP = ("--gpu-only", "--highvram", "--lowvram", "--novram", "--cpu")
+CACHE_GROUP = ("--cache-ram", "--cache-classic", "--cache-lru", "--cache-none",
+               "--high-ram")
+
+LOW_MEMORY_OPTIONS = (
+    Safeguard("--disable-smart-memory", "smart-memory",
+              "keeping models on the card between steps"),
+    Safeguard("--lowvram", "lowvram",
+              "running the text encoder on the graphics card"),
+    Safeguard("--cache-none", "cache-none",
+              "keeping finished steps in memory in case they are reused"),
+)
+
+# Which mutually exclusive group each of the above belongs to, if any.
+_GROUPS = {"--lowvram": VRAM_GROUP, "--cache-none": CACHE_GROUP}
+
+
+def choose_low_memory(engine_dir: Path, *, enabled: bool,
+                      extra: Sequence[str] = ()) -> Safeguards:
+    """The low-memory options this engine will accept, if it is switched on."""
+    if not enabled:
+        return Safeguards()
+    typed = set(extra)
+    applied, unavailable, overridden = [], [], []
+    for option in LOW_MEMORY_OPTIONS:
+        group = _GROUPS.get(option.flag, (option.flag,))
+        if typed.intersection(group):
+            overridden.append(option)     # the user has chosen from this group
+        elif engine_understands(engine_dir, option.flag):
+            applied.append(option)
+        else:
+            unavailable.append(option)
+    return Safeguards(tuple(applied), tuple(unavailable), tuple(overridden))
+
+
+# --------------------------------------------------------------------------
+# Layer streaming
+# --------------------------------------------------------------------------
+#
+# The other kind of "sequential", and the one people actually mean. Low memory
+# mode above moves whole MODELS off the card between steps. This streams the
+# weights of a single model into the card a block at a time, so a model larger
+# than the card can still run.
+#
+# ComfyUI has this, and at v0.34.0 the switch is --novram. Traced through
+# comfy/model_management.py:
+#
+#     args.novram             -> set_vram_to = VRAMState.NO_VRAM   (~line 560)
+#     vram_state == NO_VRAM   -> lowvram_model_memory = 0.1        (~line 1001)
+#     model_load(0.1)         -> model_use_more_vram(0.1)
+#                             -> partially_load(...)
+#
+# That 0.1 is a byte budget for resident weights: essentially none of the model
+# is kept on the card, and each block is brought over as the forward pass
+# reaches it. It is per-layer streaming, not per-model offload.
+#
+# Two consequences worth knowing rather than discovering:
+#
+# * enables_dynamic_vram() in cli_args.py is false when --novram is given, so
+#   this deliberately takes the estimate-based path. The two are alternative
+#   mechanisms for the same job, not layers of one.
+# * NO_VRAM also satisfies the DISABLE_SMART_MEMORY branch at model_management
+#   line 1091, so aggressive unloading comes along with it.
+#
+# It is slow, and honestly so: every block crosses the PCIe bus on every step,
+# so a twenty-step sample moves the model twenty times. That is the trade being
+# asked for, and it is the difference between a job that takes longer and a job
+# that cannot run at all.
+LAYER_STREAMING = Safeguard(
+    "--novram", "novram",
+    "keeping any of the model on the card between blocks")
+
+
+def choose_layer_streaming(engine_dir: Path, *, enabled: bool,
+                           extra: Sequence[str] = ()) -> Safeguards:
+    """Whether to stream model layers, if this engine still takes the flag."""
+    if not enabled:
+        return Safeguards()
+    if set(extra).intersection(VRAM_GROUP):
+        return Safeguards(overridden=(LAYER_STREAMING,))
+    if engine_understands(engine_dir, LAYER_STREAMING.flag):
+        return Safeguards(applied=(LAYER_STREAMING,))
+    return Safeguards(unavailable=(LAYER_STREAMING,))
+
+
+def low_memory_file(root: Path) -> Path:
+    return root / "state" / "low-memory"
+
+
+def layer_streaming_file(root: Path) -> Path:
+    return root / "state" / "layer-streaming"
+
+
+def read_layer_streaming(root: Path) -> bool:
+    return layer_streaming_file(root).is_file()
+
+
+def write_layer_streaming(root: Path, enabled: bool) -> None:
+    path = layer_streaming_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if enabled:
+        path.write_text("on\n", encoding="utf-8")
+    elif path.exists():
+        path.unlink()
+
+
+def read_low_memory(root: Path) -> bool:
+    return low_memory_file(root).is_file()
+
+
+def write_low_memory(root: Path, enabled: bool) -> None:
+    path = low_memory_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if enabled:
+        path.write_text("on\n", encoding="utf-8")
+    elif path.exists():
+        path.unlink()
+
+
 # The tag whose cli_args.py these flags were read from. An engine that renames
 # one is handled safely -- engine_understands drops it rather than producing a
 # command line ComfyUI refuses -- but *safely* is not the same as *silently*,
