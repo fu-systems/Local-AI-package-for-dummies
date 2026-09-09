@@ -9,8 +9,11 @@
 #
 # `adult: true` moves a pack out of the modality groups and behind the gate on
 # the choose screen. It may never be `default_checked` -- the loader refuses the
-# catalogue outright if it is. No such pack exists yet: the model has not been
-# chosen and its facts are not frozen. See docs/ADULT-PACKS.md.
+# catalogue outright if it is. See docs/ADULT-PACKS.md.
+#
+# A pack whose recipe is not frozen is SHOWN and greyed out with the reason,
+# the same as one too big for the card. It used to be absent entirely, which
+# made an unfinished feature look like a missing one.
 #
 # VRAM floors marked provisional are engineering estimates, not measurements.
 # docs/PLAN.md M0 replaces them with real numbers taken on real cards. They are
@@ -150,3 +153,24 @@ packs:
     # the GPU one is unavailable; that is a scope decision for the owner, so
     # the flag below is unchanged and this is the evidence for making it.
     experimental_on: [amd]
+
+  # --- adult ---------------------------------------------------------------
+  # Behind the age gate on the choose screen; never in the Pictures group and
+  # never pre-ticked. Visible but not installable until its recipe is frozen:
+  #
+  #     python3 tools/freeze_manifest.py catalog/recipes/image_sdxl_adult.authored.yaml
+  #
+  # That is the one remaining step, and it needs a machine that can reach
+  # Hugging Face. The model is named in the recipe (fancyfeast/big-asp-v2, an
+  # SDXL photographic finetune that drops into the SDXL graph we already ship);
+  # what is missing is its hash and size, which must come from the API rather
+  # than from anybody's memory.
+  - id: image.sdxl_adult
+    modality: Pictures
+    name: "Make pictures (adult)"
+    blurb: "Explicit images. Uses the same picture workflow as the classic model, with a
+            model trained for it. Off unless you turn it on."
+    recipe: image_sdxl_adult
+    vram_gb_min: 6          # provisional, matching image.sdxl -- same graph, same size model
+    licence: "PENDING_FREEZE — read from the model card when the recipe is frozen."
+    adult: true

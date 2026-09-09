@@ -38,6 +38,9 @@ class Pack:
     default_checked: bool = False
     experimental_on: tuple[str, ...] = ()
     download_bytes: int | None = None
+    # Is there a recipe file at all? Distinct from whether its facts are
+    # frozen: a missing file is a mistake, an unfrozen one is a step not taken.
+    recipe_found: bool = True
     # Explicit sexual content. Kept out of the modality groups, off by default,
     # and shown only after the person has said they want to see it -- see
     # docs/ADULT-PACKS.md for why this is a flag on the pack rather than a
@@ -52,11 +55,28 @@ class Pack:
         gb = self.download_gb
         return "size unknown" if gb is None else f"{gb:g} GB download"
 
+    @property
+    def is_frozen(self) -> bool:
+        """Have this pack's downloads been verified against their publisher?
+
+        The download total is the last thing tools/freeze_manifest.py writes,
+        and it only writes it once every file's size is known -- so a size is
+        exactly the signal that the whole recipe is frozen.
+        """
+        return self.download_bytes is not None
+
     def is_experimental_for(self, vendor: str) -> bool:
         return vendor in self.experimental_on
 
     def unavailable_reason(self, vram_gb: float | None) -> str | None:
         """Why this pack cannot be offered, in words a beginner can act on."""
+        if not self.is_frozen:
+            # Shown, greyed out, with the reason -- the same treatment a pack
+            # too big for the card gets. Hiding it instead is what made this
+            # look like a missing feature rather than an unfinished one.
+            return ("Not ready to install yet: the download has not been "
+                    "checked against its publisher, so we cannot promise you "
+                    "the right file. See docs/ADULT-PACKS.md.")
         if vram_gb is not None and vram_gb < self.vram_gb_min:
             return (
                 f"Needs a graphics card with at least {self.vram_gb_min:g} GB of memory. "
@@ -74,15 +94,23 @@ class Pack:
 RECIPE_SUFFIXES = (".generated.yaml", ".authored.yaml")
 
 
-def _recipe_size(recipe: str, catalog_dir: Path) -> int | None:
+def _recipe_facts(recipe: str, catalog_dir: Path) -> tuple[bool, int | None]:
+    """(is there a recipe file, what size does it declare).
+
+    The two are separate answers and conflating them hid a real distinction. A
+    missing file is a typo in `recipe:` and must fail the build. A file that is
+    present but still carries PENDING_FREEZE is a pack whose facts nobody has
+    verified yet -- honest, expected, and not a reason to refuse the whole
+    catalogue.
+    """
     for suffix in RECIPE_SUFFIXES:
         path = catalog_dir / "recipes" / f"{recipe}{suffix}"
         if not path.is_file():
             continue
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         size = data.get("estimated_download_bytes")
-        return size if isinstance(size, int) else None
-    return None
+        return True, (size if isinstance(size, int) else None)
+    return False, None
 
 
 @lru_cache(maxsize=1)
@@ -94,6 +122,7 @@ def load_packs() -> tuple[Pack, ...]:
     packs: list[Pack] = []
     for entry in doc.get("packs", []):
         adult = bool(entry.get("adult", False))
+        found, size = _recipe_facts(entry["recipe"], catalog_dir)
         if adult and entry.get("default_checked"):
             # Not a warning to be tidied up later: a pre-ticked adult pack means
             # someone clicking Continue through the defaults downloads porn they
@@ -110,7 +139,8 @@ def load_packs() -> tuple[Pack, ...]:
                 licence=entry["licence"],
                 default_checked=bool(entry.get("default_checked", False)),
                 experimental_on=tuple(entry.get("experimental_on", ())),
-                download_bytes=_recipe_size(entry["recipe"], catalog_dir),
+                download_bytes=size,
+                recipe_found=found,
                 adult=adult,
             )
         )

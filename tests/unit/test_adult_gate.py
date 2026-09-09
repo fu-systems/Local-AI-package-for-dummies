@@ -176,17 +176,19 @@ class TestTheAuthoredRecipeIsReadable:
             "estimated_download_bytes: 7000000000\n", encoding="utf-8")
         monkeypatch.setattr(resources, "resource_path", lambda _name: tmp_path)
 
-        assert packs_module._recipe_size("derived", tmp_path) == 5_000_000_000
-        assert packs_module._recipe_size("byhand", tmp_path) == 7_000_000_000
-        assert packs_module._recipe_size("missing", tmp_path) is None
+        assert packs_module._recipe_facts("derived", tmp_path) == (True, 5_000_000_000)
+        assert packs_module._recipe_facts("byhand", tmp_path) == (True, 7_000_000_000)
+        assert packs_module._recipe_facts("missing", tmp_path) == (False, None)
 
-    def test_an_unfrozen_recipe_reports_no_size_rather_than_a_wrong_one(self, tmp_path):
+    def test_an_unfrozen_recipe_is_found_but_has_no_size(self, tmp_path):
+        """Found and unfrozen is a different answer from not found at all: one
+        is a step not taken, the other is a typo."""
         from toolshed.catalog import packs as packs_module
 
         (tmp_path / "recipes").mkdir()
         (tmp_path / "recipes" / "x.authored.yaml").write_text(
             "estimated_download_bytes: PENDING_FREEZE\n", encoding="utf-8")
-        assert packs_module._recipe_size("x", tmp_path) is None
+        assert packs_module._recipe_facts("x", tmp_path) == (True, None)
 
     def test_the_adult_recipe_names_a_model_but_is_not_yet_frozen(self):
         """The repo and path are a proposal for freeze_manifest.py to verify.
@@ -220,9 +222,16 @@ class TestTheAuthoredRecipeIsReadable:
         assert "estimated_download_bytes" in pending, (
             "the download total shown to the user cannot be a guess")
 
-    def test_no_adult_pack_is_offered_while_it_is_unfrozen(self):
-        """The catalogue guard: a pack with no frozen size cannot be offered,
-        so the gate stays invisible until the facts exist."""
+    def test_the_adult_pack_is_visible_but_not_installable(self):
+        """It used to be absent from the catalogue entirely, which read as a
+        missing feature rather than an unfinished one. Now the gate shows it,
+        greyed out, saying exactly why -- and it still cannot be installed
+        until its downloads have been checked against the publisher."""
         from toolshed.catalog.packs import adult, load_packs
 
-        assert adult(load_packs()) == ()
+        explicit = adult(load_packs())
+        assert [p.id for p in explicit] == ["image.sdxl_adult"]
+        pack = explicit[0]
+        assert not pack.is_frozen
+        assert pack.unavailable_reason(24.0), "an unfrozen pack must not be installable"
+        assert not pack.default_checked

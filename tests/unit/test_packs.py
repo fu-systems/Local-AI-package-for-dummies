@@ -16,19 +16,48 @@ def test_catalogue_is_not_empty(packs):
     assert packs, "packs.yaml produced nothing; the choose screen would be blank"
 
 
-def test_every_pack_has_a_size_derived_from_its_recipe(packs):
-    """Sizes come from catalog/recipes/*.generated.yaml, which is derived from
-    Comfy Org's templates. A missing size means packs.yaml points at a recipe
-    that does not exist, and the user would see 'size unknown'."""
-    missing = [p.id for p in packs if p.download_bytes is None]
-    assert not missing, f"no derived size for: {missing}"
+def test_every_pack_points_at_a_recipe_that_exists(packs):
+    """A typo in `recipe:` is a mistake and must fail the build. This used to
+    be checked by way of the download size, which conflated it with a recipe
+    that exists but is not frozen yet -- a different and legitimate state."""
+    missing = [p.id for p in packs if not p.recipe_found]
+    assert not missing, f"packs.yaml points at no such recipe: {missing}"
 
 
 def test_sizes_are_plausible(packs):
     """A generative model pack is gigabytes. Catching a units mistake here is
-    cheaper than shipping a confirmation screen that says 0 GB."""
+    cheaper than shipping a confirmation screen that says 0 GB.
+
+    Only the frozen ones have a size to check; an unfrozen pack is covered by
+    the test below instead."""
     for p in packs:
-        assert 1e9 < p.download_bytes < 200e9, f"{p.id}: {p.download_bytes} bytes"
+        if p.is_frozen:
+            assert 1e9 < p.download_bytes < 200e9, f"{p.id}: {p.download_bytes} bytes"
+
+
+def test_an_unfrozen_pack_is_shown_but_cannot_be_installed(packs):
+    """The guard that replaced "a pack with no size fails the suite".
+
+    Failing the suite kept unverified packs out of the catalogue, but it also
+    kept them off the screen entirely, which made an unfinished feature look
+    like a missing one. Now they appear, greyed out, with the reason -- and the
+    refusal to install moved from build time to run time, where the user can
+    see it.
+    """
+    for p in packs:
+        if not p.is_frozen:
+            reason = p.unavailable_reason(None)
+            assert reason, f"{p.id} is unfrozen but offered as installable"
+            assert "not ready" in reason.lower()
+            assert p.size_text() == "size unknown"
+
+
+def test_a_frozen_pack_is_not_blocked_by_this(packs):
+    """The check must not quietly disable the whole catalogue."""
+    frozen = [p for p in packs if p.is_frozen]
+    assert frozen, "no frozen packs at all would mean nothing is installable"
+    for p in frozen:
+        assert p.unavailable_reason(None) is None
 
 
 def test_modalities_keep_catalogue_order_without_repeats(packs):
@@ -54,9 +83,11 @@ class TestAvailability:
 
     def test_unknown_vram_does_not_block(self, packs):
         """Failing to read VRAM must not lock someone out of their own card;
-        setup's smoke test settles it later."""
+        setup's smoke test settles it later. An unfrozen pack is blocked for a
+        different reason entirely, so it is not evidence either way here."""
         for p in packs:
-            assert p.unavailable_reason(None) is None
+            if p.is_frozen:
+                assert p.unavailable_reason(None) is None
 
     def test_amd_3d_is_flagged_experimental(self, packs):
         pack = next(p for p in packs if p.id == "model3d.trellis2")
