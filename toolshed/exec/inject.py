@@ -30,6 +30,14 @@ PACK_FOLDERS: dict[str, tuple[str, ...]] = {
     "video.wan22_14b": ("video/02 Make a video (big model).json",),
     "audio.acestep": ("audio/01 Make music.json",),
     "model3d.trellis2": ("3d/01 Photo to 3D model.json",),
+    # Adult packs ship their own workflows rather than borrowing the SDXL one,
+    # because each needs its own checkpoint name in the loader -- and Liberty
+    # needs its own latent size too, being SD 1.5 rather than SDXL. Neither was
+    # listed here before, so both installed a model and injected nothing: the
+    # pack downloaded gigabytes and left the person to wire up a graph by hand,
+    # which is the exact thing this app exists to avoid.
+    "image.sdxl_adult": ("image/04 Text to picture (adult).json",),
+    "image.liberty_adult": ("image/05 Text to picture (adult, Liberty).json",),
 }
 
 # Sidebar order comes from the folder name, so the numbers are load-bearing.

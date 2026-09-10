@@ -41,6 +41,8 @@ class Pack:
     # Is there a recipe file at all? Distinct from whether its facts are
     # frozen: a missing file is a mistake, an unfrozen one is a step not taken.
     recipe_found: bool = True
+    # A warning shown on the row, written by hand. Overrides the automatic one.
+    caution_text: str = ""
     # Explicit sexual content. Kept out of the modality groups, off by default,
     # and shown only after the person has said they want to see it -- see
     # docs/ADULT-PACKS.md for why this is a flag on the pack rather than a
@@ -86,7 +88,16 @@ class Pack:
         Deliberately separate from unavailable_reason. That one greys the row
         out; this one lets them proceed knowing what is unverified, which is
         the difference between a safeguard and a wall.
+
+        An authored `caution:` in packs.yaml wins, because the automatic one
+        below reasons from is_frozen -- which really means "do we know the
+        download size" -- and size is rarely the most important thing to say.
+        A model whose own author warns it returns explicit images from prompts
+        that did not ask for any needs that on the row, and would have got a
+        sentence about byte counts instead.
         """
+        if self.caution_text:
+            return " ".join(self.caution_text.split())
         if not self.is_frozen:
             return ("We do not know this download's size in advance, and the file it "
                     "names has not been confirmed from here — if the publisher has "
@@ -177,6 +188,7 @@ def load_packs() -> tuple[Pack, ...]:
                 experimental_on=tuple(entry.get("experimental_on", ())),
                 download_bytes=size,
                 recipe_found=found,
+                caution_text=entry.get("caution", ""),
                 adult=adult,
             )
         )

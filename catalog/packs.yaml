@@ -226,3 +226,47 @@ packs:
     vram_gb_min: 6          # provisional, matching image.sdxl -- same graph, same size model
     licence: "PENDING_FREEZE — read from the model card when the recipe is frozen."
     adult: true
+
+  - id: image.liberty_adult
+    modality: Pictures
+    name: "Make pictures (adult, Liberty)"
+    blurb: "An older community model, explicit by default — its author warns you can get
+            explicit pictures from prompts that did not ask for them. Small and quick, and
+            it runs on almost any card. Off unless you turn it on."
+    recipe: image_liberty_adult
+    # From the card: minimum 1.4 GB, recommended 3.2 GB. 4 is the nearest floor
+    # the schema offers above the recommendation, and this is an SD 1.5 model
+    # at 512x512 -- by a wide margin the smallest thing in the catalogue.
+    vram_gb_min: 4
+    licence: "The author says free for any purpose, commercial or not — but it merges 23+
+              community models, so check the credits before you rely on that."
+    # The author's own warning, on the row, before it is ticked. This is the
+    # most surprising thing the pack can do and it should surprise nobody.
+    caution: "Its author calls this an \"extremely NSFW biased model\" and warns you can
+              get explicit pictures from prompts that did not ask for them — so do not run
+              it where someone might be looking over your shoulder. They have also stopped
+              developing it, say it is not a good model for beginners, and it is not
+              intended for anime. Nothing about this download was checked from here."
+    adult: true
+    # Chosen by the owner, who supplied the model page. Everything below is the
+    # publisher's own text, recorded because it bears on the recommendation:
+    #
+    # * The author has DEPRECATED it and points at Requiem instead. We ship a
+    #   model its own maker suggests replacing.
+    # * "Extremely NSFW biased model!!! ... Use it at your own risk of getting
+    #   unprompted explicit images." That is why the blurb leads with it: a
+    #   tame prompt returning an explicit picture is the single most surprising
+    #   thing this pack can do, and it should surprise nobody who ticked it.
+    # * "This is not an easy to prompt model, nor the best one for begginers."
+    #   The author's own words about an app for beginners. Recorded rather than
+    #   argued with; the START HERE note passes the warning on.
+    # * It answers the male-anatomy request more directly than big-asp-v2 does
+    #   -- AIrotic Arts' penis model and Homoerotic v2 are in its credits, and
+    #   two of its trigger words name it. That is intent, not a measured
+    #   result; the contact sheet in docs/ADULT-PACKS.md still decides.
+    # * It does NOT answer the anime request: "it won't make the best anime art
+    #   out there either", says the author.
+    #
+    # It is SD 1.5, so it gets its own 512x512 workflow rather than the SDXL
+    # graph -- see the recipe. Nothing here was verified against Civitai; this
+    # environment cannot reach it.

@@ -260,7 +260,7 @@ class TestTheAuthoredRecipeIsReadable:
         from toolshed.catalog.packs import adult, load_packs
 
         explicit = adult(load_packs())
-        assert [p.id for p in explicit] == ["image.sdxl_adult"]
+        assert [p.id for p in explicit] == ["image.sdxl_adult", "image.liberty_adult"]
         pack = explicit[0]
         assert not pack.is_frozen, "nothing here invented a hash or a size"
         assert pack.unavailable_reason(24.0) is None, "the owner asked for this to install"

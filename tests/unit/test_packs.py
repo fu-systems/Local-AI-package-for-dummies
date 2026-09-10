@@ -78,6 +78,30 @@ def test_an_unfrozen_pack_is_installable_with_a_caution(packs):
             assert p.size_text() == "size unknown"
 
 
+def test_an_authored_caution_is_shown_instead_of_the_automatic_one(packs):
+    """The automatic caution reasons from is_frozen, which really means "do we
+    know the download size" -- so a pack with a size estimate got no warning at
+    all, however little about it had been checked.
+
+    Liberty is exactly that case, and the thing worth saying about it is not
+    its byte count: its own author warns it returns explicit images from
+    prompts that did not ask for any.
+    """
+    liberty = next(p for p in packs if p.id == "image.liberty_adult")
+    assert liberty.is_frozen, "it has a size, so the automatic caution stays quiet"
+    said = liberty.caution()
+    assert said and "did not ask for them" in said
+    assert "\n" not in said, "authored cautions are folded YAML; unwrap them"
+
+
+def test_every_adult_pack_says_something_before_it_is_ticked(packs):
+    """Explicit material is the one place where silence on the row is not an
+    option, whatever the freeze state happens to be."""
+    for p in packs:
+        if p.adult:
+            assert p.caution(), f"{p.id} is explicit and warns nobody"
+
+
 def test_no_pack_shows_the_placeholder_token_on_screen(packs):
     """PENDING_FREEZE stays in the data -- it is what fails a release build --
     but it is not a thing to show a beginner now that these packs install."""
