@@ -193,15 +193,30 @@ packs:
 
   # --- adult ---------------------------------------------------------------
   # Behind the age gate on the choose screen; never in the Pictures group and
-  # never pre-ticked. Visible but not installable until its recipe is frozen:
+  # never pre-ticked. INSTALLABLE, on the owner's explicit instruction, with
+  # its recipe still unfrozen.
+  #
+  # That was three positions in a row: absent from the catalogue, then greyed
+  # out, now installable with the unknowns on the row. The middle one was
+  # defended with a claim that does not survive reading the other recipes --
+  # "the download has not been checked against its publisher". Neither has
+  # image_sdxl_simple's. Every pack we ship carries sha256: PENDING_FREEZE and
+  # size_bytes: PENDING_FREEZE and resolves both from the publisher at install
+  # time; see planner/plan.py Download. The only thing this pack really lacked
+  # was estimated_download_bytes, a number for the confirmation screen.
+  #
+  # What is genuinely unverified, and what the row now says: nobody has
+  # confirmed from here that the repo and filename resolve, because this
+  # environment has no route to Hugging Face (the gateway refuses CONNECT to
+  # huggingface.co:443). If the publisher has renamed the file the download
+  # fails and says so. Nothing here invents a hash or a size to paper over it.
+  #
+  # Still worth doing on a machine that can reach the API:
   #
   #     python3 tools/freeze_manifest.py catalog/recipes/image_sdxl_adult.authored.yaml
   #
-  # That is the one remaining step, and it needs a machine that can reach
-  # Hugging Face. The model is named in the recipe (fancyfeast/big-asp-v2, an
-  # SDXL photographic finetune that drops into the SDXL graph we already ship);
-  # what is missing is its hash and size, which must come from the API rather
-  # than from anybody's memory.
+  # The model is named in the recipe (fancyfeast/big-asp-v2, an SDXL
+  # photographic finetune that drops into the SDXL graph we already ship).
   - id: image.sdxl_adult
     modality: Pictures
     name: "Make pictures (adult)"

@@ -68,15 +68,51 @@ class Pack:
     def is_experimental_for(self, vendor: str) -> bool:
         return vendor in self.experimental_on
 
-    def unavailable_reason(self, vram_gb: float | None) -> str | None:
-        """Why this pack cannot be offered, in words a beginner can act on."""
+    def licence_text(self) -> str:
+        """The licence as shown on screen.
+
+        The catalogue keeps PENDING_FREEZE where nobody has read the model card
+        yet, and that token is what fails a release build -- but it is not a
+        thing to put in front of a beginner, so it is translated here rather
+        than removed from the data.
+        """
+        if PENDING in self.licence:
+            return "Licence not confirmed yet — read the model card before you rely on it"
+        return self.licence
+
+    def caution(self) -> str | None:
+        """Something the person should know, that does not stop the install.
+
+        Deliberately separate from unavailable_reason. That one greys the row
+        out; this one lets them proceed knowing what is unverified, which is
+        the difference between a safeguard and a wall.
+        """
         if not self.is_frozen:
-            # Shown, greyed out, with the reason -- the same treatment a pack
-            # too big for the card gets. Hiding it instead is what made this
-            # look like a missing feature rather than an unfinished one.
-            return ("Not ready to install yet: the download has not been "
-                    "checked against its publisher, so we cannot promise you "
-                    "the right file. See docs/ADULT-PACKS.md.")
+            return ("We do not know this download's size in advance, and the file it "
+                    "names has not been confirmed from here — if the publisher has "
+                    "renamed or removed it, the download will fail and say so. What "
+                    "does arrive is still checked against the publisher's own hash as "
+                    "it lands, the same as every other pack.")
+        return None
+
+    def unavailable_reason(self, vram_gb: float | None) -> str | None:
+        """Why this pack cannot be offered, in words a beginner can act on.
+
+        An unfrozen recipe is NOT one of those reasons any more, and the block
+        it used to raise said something untrue: "the download has not been
+        checked against its publisher". No pack's downloads have been, at
+        release time -- image_sdxl_simple ships with sha256 and size_bytes both
+        PENDING_FREEZE, exactly like this one, and resolves them from the
+        publisher at install time (see planner/plan.py Download). The only
+        thing an unfrozen pack really lacked was estimated_download_bytes, a
+        figure for the confirmation screen, which is not a safety property and
+        is a poor reason to refuse to install anything.
+
+        So it is a caution() now, not a wall. The owner asked for these to be
+        installable knowing they are unverified; that is a decision the person
+        who ships this gets to make, and the honest way to carry it out is to
+        say what is unknown rather than to invent it.
+        """
         if vram_gb is not None and vram_gb < self.vram_gb_min:
             return (
                 f"Needs a graphics card with at least {self.vram_gb_min:g} GB of memory. "
