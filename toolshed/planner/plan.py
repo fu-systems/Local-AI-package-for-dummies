@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from toolshed.catalog.packs import Pack
+from toolshed.catalog.packs import RECIPE_SUFFIXES, Pack
 from toolshed.hw.detect import HardwareReport
 from toolshed.planner.torchsel import TorchChoice, choose_torch
 
@@ -184,22 +184,52 @@ def _downloads_for(pack: Pack, data_root: Path) -> tuple[Download, ...]:
 
     from toolshed import resources
 
-    path = resources.resource_path("catalog", "recipes", f"{pack.recipe}.generated.yaml")
-    if not path.is_file():
+    # Both recipe kinds, and for the same reason packs.py reads both: a pack
+    # whose graph is an existing template but whose model is not has nothing
+    # upstream to derive from and is written by hand.
+    #
+    # This read .generated.yaml alone, so image.sdxl_adult -- the one authored
+    # recipe we ship -- resolved to no downloads at all. Nothing failed: the
+    # pack installed, fetched nothing, and the first generation died on a
+    # missing checkpoint, a long way from the cause. The catalogue loader
+    # learned about authored recipes when they were introduced and this did
+    # not, which is exactly the kind of split RECIPE_SUFFIXES exists to stop.
+    doc: dict = {}
+    for suffix in RECIPE_SUFFIXES:
+        path = resources.resource_path("catalog", "recipes", f"{pack.recipe}{suffix}")
+        if path.is_file():
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            break
+    else:
         return ()
-    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
     out: list[Download] = []
     for entry in (doc.get("files") or {}).values():
-        repo, rel, dest = entry.get("repo"), entry.get("path"), entry.get("dest")
-        filename = entry.get("filename")
-        if not all((repo, rel, dest, filename)) or PENDING in (repo, rel):
+        dest, filename = entry.get("dest"), entry.get("filename")
+        if not all((dest, filename)):
             continue
-        revision = entry.get("revision")
-        revision = "main" if not revision or revision == PENDING else revision
+
+        # A direct URL, for a model that is not on Hugging Face at all. Every
+        # derived recipe names a repo and a path because that is what the
+        # templates give us, but a community checkpoint is often published
+        # somewhere with no such structure, and the alternative to expressing
+        # that here is not expressing it anywhere.
+        url = entry.get("url")
+        if url and PENDING not in url:
+            pass
+        elif url:
+            continue                      # named, but nobody has filled it in
+        else:
+            repo, rel = entry.get("repo"), entry.get("path")
+            if not all((repo, rel)) or PENDING in (repo, rel):
+                continue
+            revision = entry.get("revision")
+            revision = "main" if not revision or revision == PENDING else revision
+            url = f"https://huggingface.co/{repo}/resolve/{revision}/{rel}"
+
         size = entry.get("size_bytes")
         out.append(Download(
-            url=f"https://huggingface.co/{repo}/resolve/{revision}/{rel}",
+            url=url,
             dest=data_root / "models" / dest,
             filename=filename,
             sha256=entry.get("sha256") or PENDING,

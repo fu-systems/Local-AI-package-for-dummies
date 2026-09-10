@@ -24,6 +24,26 @@ def test_every_pack_points_at_a_recipe_that_exists(packs):
     assert not missing, f"packs.yaml points at no such recipe: {missing}"
 
 
+def test_every_pack_actually_resolves_something_to_download(packs):
+    """A pack that resolves no files installs successfully and fetches nothing.
+
+    This is how the one authored recipe we ship broke: the planner read only
+    .generated.yaml, so image.sdxl_adult produced an empty download list. The
+    install "worked", the models never arrived, and the first generation died
+    on a missing checkpoint -- a long way from the cause, and with nothing in
+    between saying so.
+
+    Counting downloads is the check that would have caught it. A pack that
+    names files nobody can fetch is not installable, whatever the row says.
+    """
+    from pathlib import Path
+
+    from toolshed.planner.plan import _downloads_for
+
+    empty = [p.id for p in packs if not _downloads_for(p, Path("/tmp/plan-check"))]
+    assert not empty, f"these packs would install nothing at all: {empty}"
+
+
 def test_sizes_are_plausible(packs):
     """A generative model pack is gigabytes. Catching a units mistake here is
     cheaper than shipping a confirmation screen that says 0 GB.
