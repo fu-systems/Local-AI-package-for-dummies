@@ -97,11 +97,35 @@ def _total_from_416(response: httpx.Response) -> int:
     return int(tail) if tail.strip().isdigit() else 0
 
 
-def _headers(existing: int, token: str | None) -> dict[str, str]:
+# The token is a Hugging Face one, for gated repos. It is sent to that host
+# and nowhere else.
+#
+# This used to be attached to whatever URL it was handed, which was harmless
+# while every URL in every recipe was built as
+# https://huggingface.co/{repo}/resolve/... and stopped being harmless the
+# moment a recipe could name a direct URL to any host: a community checkpoint
+# on some other site would have received the user's Hugging Face credential in
+# an Authorization header, for a download that never needed one.
+TOKEN_HOSTS = ("huggingface.co", "hf.co")
+
+
+def _token_is_for(url: str) -> bool:
+    """Does this URL belong to the host the token authenticates to?
+
+    Matched on the parsed host, exactly or as a subdomain -- never with a
+    substring test, which "huggingface.co.evil.example" would satisfy.
+    """
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(url).hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in TOKEN_HOSTS)
+
+
+def _headers(existing: int, token: str | None, url: str = "") -> dict[str, str]:
     headers: dict[str, str] = {}
     if existing:
         headers["Range"] = f"bytes={existing}-"
-    if token:
+    if token and (not url or _token_is_for(url)):
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
@@ -111,7 +135,7 @@ def remote_size(url: str, *, token: str | None = None, client: httpx.Client | No
     owned = client is None
     client = client or httpx.Client(follow_redirects=True, timeout=30.0)
     try:
-        r = client.head(url, headers=_headers(0, token))
+        r = client.head(url, headers=_headers(0, token, url))
         if r.status_code >= 400:
             return 0
         # HF reports the true object size here even when the body is a redirect.
@@ -175,7 +199,7 @@ def _stream_response(
     should_cancel: CancelFn | None,
     dest_dir: Path,
 ) -> tuple[int, str]:
-    with client.stream("GET", url, headers=_headers(existing, token)) as response:
+    with client.stream("GET", url, headers=_headers(existing, token, url)) as response:
         if existing and response.status_code == 200:
             # The server ignored our Range and is sending the whole file again.
             existing, digest = 0, hashlib.sha256()

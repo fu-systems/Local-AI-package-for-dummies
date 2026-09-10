@@ -45,6 +45,8 @@ VERB = {
     "video.wan22_14b": "Make a video",
     "audio.acestep": "Make music",
     "model3d.trellis2": "Make a 3D model",
+    "image.sdxl_adult": "Make a picture",
+    "image.liberty_adult": "Make a picture",
 }
 
 PLACEHOLDER = {
@@ -55,6 +57,12 @@ PLACEHOLDER = {
     "video.wan22_14b": "a paper boat drifting down a rain-filled gutter",
     "audio.acestep": "slow piano, warm tape hiss, rain outside",
     "model3d.trellis2": "",
+    # Neutral on purpose. Easy mode shows the placeholder in grey before
+    # anything is typed, so it sits on screen unprompted -- an explicit example
+    # here would put explicit words in front of someone who has only opened the
+    # tab. The model needs no encouragement in that direction either way.
+    "image.sdxl_adult": "a portrait, natural window light, 35mm",
+    "image.liberty_adult": "a portrait, natural window light, 35mm",
 }
 
 

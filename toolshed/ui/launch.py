@@ -80,6 +80,11 @@ class LaunchPage(QtWidgets.QWidget):
         self.root = root
         self.engine: Engine | None = None
         self.worker: EngineWorker | None = None
+        # The memory settings the RUNNING engine was actually started with, or
+        # None when nothing is running. Not the same as what the checkboxes
+        # say: both are read once at startup, so the two drift apart the moment
+        # somebody ticks a box while ComfyUI is up.
+        self._running_with: tuple[bool, bool] | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 8)
@@ -198,6 +203,21 @@ class LaunchPage(QtWidgets.QWidget):
             "This is the last resort, and it is genuinely slow: every block "
             "crosses to the card on every step, so a twenty-step picture moves "
             "the model twenty times. Use it when something will not run at all."))
+
+        # Both boxes are read once, when the engine starts. Ticking one while
+        # ComfyUI is up therefore changes nothing until it is restarted -- and
+        # the button then reads "Open ComfyUI again", which reopened the browser
+        # on an engine still running the old setting and said nothing about it.
+        # That is how somebody turns on layer streaming, watches the same video
+        # die the same way, and concludes the option does not exist.
+        self.restart_note = QtWidgets.QLabel(
+            "ComfyUI is still running with the previous setting. Press "
+            "Stop ComfyUI, then Open ComfyUI, for this to take effect.")
+        self.restart_note.setWordWrap(True)
+        self.restart_note.setVisible(False)
+        flags_layout.addWidget(self.restart_note)
+        self.low_memory.toggled.connect(self._refresh_restart_note)
+        self.layer_streaming.toggled.connect(self._refresh_restart_note)
         layout.addWidget(self.flags_box)
 
         self.log = QtWidgets.QPlainTextEdit()
@@ -237,9 +257,35 @@ class LaunchPage(QtWidgets.QWidget):
 
     # -- actions ------------------------------------------------------------
 
+    def memory_settings(self) -> tuple[bool, bool]:
+        """What the boxes say now, in the order the engine reads them."""
+        return (self.low_memory.isChecked(), self.layer_streaming.isChecked())
+
+    def settings_are_stale(self) -> bool:
+        """Is a running engine using settings the user has since changed?"""
+        return (self._running_with is not None
+                and self._running_with != self.memory_settings())
+
+    def _refresh_restart_note(self) -> None:
+        self.restart_note.setVisible(self.settings_are_stale())
+
     def start_engine(self, env: dict[str, str] | None = None) -> None:
         if self.is_running and self.engine:
-            # Already up: this is now just "show me it again".
+            # Already up. The memory settings were read when it started, so a
+            # box ticked since then is not in force -- and silently reopening
+            # the browser here is what made the setting look broken. Keep the
+            # choice (it applies to the next start) and say plainly why this
+            # run is unchanged. Deliberately not restarting on their behalf: a
+            # video part-way through would be killed by it.
+            if self.settings_are_stale():
+                write_low_memory(self.root, self.low_memory.isChecked())
+                write_layer_streaming(self.root, self.layer_streaming.isChecked())
+                self._refresh_restart_note()
+                self.status.setText(
+                    "ComfyUI is already running, and it started before you changed "
+                    "that setting, so this run is not using it. Press Stop ComfyUI "
+                    "and then Open ComfyUI to apply it.")
+                return
             open_in_browser(self.engine.url)
             return
 
@@ -346,6 +392,9 @@ class LaunchPage(QtWidgets.QWidget):
         self.status.setText(
             "Starting ComfyUI. The first time takes a minute or two while it loads "
             "your graphics card and reads the models.")
+        # What this engine is actually running with, fixed for its lifetime.
+        self._running_with = self.memory_settings()
+        self._refresh_restart_note()
         self.worker.start()
 
     def _on_rocm(self, manifest) -> bool:
@@ -376,6 +425,11 @@ class LaunchPage(QtWidgets.QWidget):
             self.status.setText(
                 "ComfyUI is running, but we could not open your browser for you.")
 
+    def _forget_running_settings(self) -> None:
+        """Nothing is running, so no setting can be stale against it."""
+        self._running_with = None
+        self._refresh_restart_note()
+
     def _on_died(self, message: str) -> None:
         """The engine went away on its own, after it had been running.
 
@@ -394,6 +448,7 @@ class LaunchPage(QtWidgets.QWidget):
             f"{message} Its last output is below, and the full log is at "
             f"{Layout(self.root).log_file}.")
         self.show_log.setChecked(True)
+        self._forget_running_settings()
         self.engine_stopped.emit()
 
     def _on_failed(self, message: str, detail: str) -> None:
@@ -402,6 +457,7 @@ class LaunchPage(QtWidgets.QWidget):
         self.open_button.setEnabled(True)
         self.open_button.setText("Try again")
         self.status.setText(message)
+        self._forget_running_settings()
         if detail:
             # The engine's own last words are the only useful thing here, so
             # show them rather than making the user go hunting for a log file.
@@ -421,6 +477,7 @@ class LaunchPage(QtWidgets.QWidget):
         self.open_button.setText("Open ComfyUI")
         self.status.setText("ComfyUI is stopped.")
         self.easy_button.setEnabled(False)
+        self._forget_running_settings()
         self.engine_stopped.emit()
 
     def open_output_folder(self) -> None:

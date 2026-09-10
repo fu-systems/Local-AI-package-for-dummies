@@ -1,0 +1,115 @@
+# Liberty (Main), an SD 1.5 checkpoint merge from Civitai.
+#
+# Hand-authored: there is no upstream Comfy Org template for this model, so
+# nothing to derive from. The graph it runs in is ours too -- see the note on
+# base_model below, which is the thing that decides it.
+#
+# PROVENANCE OF EVERY VALUE HERE
+#
+# The owner supplied the model page: the download link, the description, and a
+# screenshot of the card. Nothing in this file came from anywhere else, and
+# nothing was checked against Civitai -- this environment cannot reach
+# civitai.com (the gateway refuses CONNECT, the same as huggingface.co). So
+# these are the publisher's own figures as displayed, transcribed, and not
+# independently confirmed:
+#
+#   file                LibertyMain.safetensors
+#   size                1.99 GB          (card, "fp16 SafeTensor")
+#   type                CHECKPOINT MERGE
+#   base model          SD 1.5
+#   published           30 January 2023
+#   downloads           31,732
+#   reviews             Very Positive (152)
+#   AUTOV2 hash         8634D80DEC       (NOT a sha256 -- see below)
+#   VRAM                min 1.4 GB, recommended 3.2 GB
+#
+# sha256 stays PENDING_FREEZE. The card shows an AUTOV2 hash, which is
+# Civitai's own short identifier and not the sha256 our downloader compares
+# against -- putting it in that field would fail every download with a
+# mismatch, or worse, be treated as verification that never happened. The
+# download is still hash-checked as it lands, against what the publisher
+# serves; that is the same footing every other pack in this catalogue is on.
+#
+# size_bytes likewise stays PENDING_FREEZE: 1.99 GB is a rounded figure from a
+# web page, and this field is compared byte-for-byte. estimated_download_bytes
+# below is the rounded figure, and is only ever used to show a total.
+
+id: image.liberty_adult
+default_checked: false
+custom_nodes: []
+
+# 1.99 GB as displayed on the card, in bytes, rounded. Used for the "how much
+# am I about to download" total and nothing else, so a rounded value is honest
+# here in a way it would not be in size_bytes.
+estimated_download_bytes: 1990000000
+
+# THE THING THAT DECIDES THE WORKFLOW.
+#
+# This is SD 1.5, not SDXL. Structurally the SDXL graph we ship would load it
+# -- CheckpointLoaderSimple detects either, and plain CLIPTextEncode is right
+# for SD 1.5's single text encoder -- but that graph's EmptyLatentImage is
+# 1024x1024, and SD 1.5 was trained at 512x512. Asking it for 1024 is the
+# classic way to get two heads and three arms, and it would have looked like
+# the model was bad rather than the size being wrong.
+#
+# So this pack gets its own workflow at 512x512 rather than borrowing the SDXL
+# one. Same node shapes, different latent, and its own prompts.
+base_model: sd15
+native_size: [512, 512]
+
+files:
+  checkpoint:
+    # Supplied by the owner, used verbatim, deliberately not "cleaned up": the
+    # fileId query selects which file of the version to serve, so dropping it
+    # would silently fetch a different variant (the 2.14 GB .ckpt rather than
+    # the 1.99 GB .safetensors).
+    #
+    # A direct url rather than repo/path -- Civitai has no such structure, and
+    # supporting this is why planner/plan.py grew url handling.
+    url: https://civitai.com/api/download/models/6908?fileId=7027
+    dest: checkpoints
+    filename: LibertyMain.safetensors
+    sha256: PENDING_FREEZE
+    size_bytes: PENDING_FREEZE
+    gated: PENDING_FREEZE
+    # The author's words: "it is free to use for any open source purpose,
+    # commercial or not", and the newer Requiem model is described as
+    # "licenseless". Recorded, not endorsed: the same paragraph says "All the
+    # models I used were licenseless when I grabbed them, although some have
+    # changed licenses afterwards", and Liberty is a merge of 23+ community
+    # models. That is a statement about the author's intent, not a licence
+    # grant they are necessarily able to make for every input. Anyone shipping
+    # this commercially should read the credits list themselves.
+    licence: PENDING_FREEZE
+    from_node: CheckpointLoaderSimple
+    # The card says the VAE is baked in and the CLIP is fixed, so this is the
+    # only file. No separate VAE download, which is why `files` has one entry.
+
+workflows:
+- id: PENDING_FREEZE
+  title: Text to picture, adult (Liberty)
+  inject_as: PENDING_FREEZE
+
+# WHAT THE MODEL CARD SAYS, kept because it bears on whether this belongs in a
+# beginners' app at all. These are the author's own words:
+#
+# * "Deprecated model, consider updating to: .../147363/requiem". The author
+#   has moved on from it. We are shipping a model its own maker suggests
+#   replacing.
+# * "Extremely NSFW biased model!!! ... Use it at your own risk of getting
+#   unprompted explicit images." A tame prompt can return an explicit picture.
+#   Behind the age gate that is a stated property rather than a surprise, and
+#   it is the reason this pack can never be anything but gated.
+# * "This is not an easy to prompt model, nor the best one for begginers."
+#   Said plainly by the author, about an app whose entire premise is
+#   beginners. Recorded here rather than argued with.
+# * "it is not so good at hardcore sex scenes ... And it won't make the best
+#   anime art out there either." So it does not answer the anime request, and
+#   the earlier decision to keep anime and adult separate still stands.
+#
+# On the request this pack actually came from: two of the five people who
+# asked wanted competent male anatomy, which big-asp-v2 left recorded as NOT
+# ESTABLISHED. Liberty's credits include AIrotic Arts' penis model and
+# Homoerotic v2, and its trigger words include "erect penis" and "flaccid
+# penis". That is evidence it was merged with the intent, not evidence it
+# renders well -- which still needs the contact sheet in docs/ADULT-PACKS.md.

@@ -45,7 +45,7 @@ class PackRow(QtWidgets.QWidget):
         blurb.setContentsMargins(22, 0, 0, 0)
         layout.addWidget(blurb)
 
-        bits = [pack.size_text(), pack.licence]
+        bits = [pack.size_text(), pack.licence_text()]
         if gpu and pack.is_experimental_for(gpu.vendor):
             bits.append("Experimental on AMD — we test it during setup and tell you honestly.")
         meta = QtWidgets.QLabel(" · ".join(bits))
@@ -59,6 +59,16 @@ class PackRow(QtWidgets.QWidget):
             why.setWordWrap(True)
             why.setContentsMargins(22, 0, 0, 0)
             layout.addWidget(why)
+
+        # Shown on a row that is still tickable. A caution the user can act on
+        # is worth more than a block they cannot: the pack installs, and what
+        # is unverified about it is on screen while they decide.
+        self.caution = pack.caution() if available else None
+        if self.caution:
+            note = QtWidgets.QLabel(self.caution)
+            note.setWordWrap(True)
+            note.setContentsMargins(22, 0, 0, 0)
+            layout.addWidget(note)
 
     def is_selected(self) -> bool:
         return self.checkbox.isChecked() and self.checkbox.isEnabled()
@@ -234,7 +244,19 @@ class ChoosePage(QtWidgets.QWidget):
             noun = "thing" if len(chosen) == 1 else "things"
             # "At most", because packs share large files and the exact total is
             # only known once the manifest is frozen and deduplicated by hash.
-            self.total_label.setText(
-                f"{len(chosen)} {noun} to set up · at most {gb:.0f} GB to download"
-            )
+            #
+            # Unless something with no size at all is in the selection, in which
+            # case it contributes zero to the sum and "at most" becomes a claim
+            # we cannot make -- the real total is this plus an unknown amount.
+            unsized = [p for p in chosen if not p.is_frozen]
+            if unsized:
+                self.total_label.setText(
+                    f"{len(chosen)} {noun} to set up · more than {gb:.0f} GB to "
+                    f"download, and we do not know the size of "
+                    f"{'one of them' if len(unsized) == 1 else 'some of them'} yet"
+                )
+            else:
+                self.total_label.setText(
+                    f"{len(chosen)} {noun} to set up · at most {gb:.0f} GB to download"
+                )
         self.selection_changed.emit()

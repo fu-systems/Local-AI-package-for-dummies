@@ -205,6 +205,21 @@ class TestEveryShippedWorkflow:
         assert claimed - shipped == set(), f"packs name missing workflows: {claimed - shipped}"
         assert shipped - claimed == set(), f"workflows no pack names: {shipped - claimed}"
 
+    def test_every_pack_ships_at_least_one_workflow(self):
+        """The other half, and the half that was missing.
+
+        The check above compares PACK_FOLDERS against the files on disk, so a
+        pack absent from PACK_FOLDERS entirely claims nothing and passes it.
+        Both adult packs were in that state: they downloaded a model and
+        injected no graph, leaving the person to build one by hand -- which is
+        the one thing this app exists to spare them.
+        """
+        from toolshed.catalog.packs import load_packs
+        from toolshed.exec.inject import PACK_FOLDERS
+
+        bare = [p.id for p in load_packs() if not PACK_FOLDERS.get(p.id)]
+        assert not bare, f"these packs install a model with nothing to run it in: {bare}"
+
     @pytest.mark.parametrize("rel", ALL_WORKFLOWS)
     def test_it_converts_into_a_self_consistent_graph(self, rel):
         workflow = load(rel)

@@ -24,6 +24,26 @@ def test_every_pack_points_at_a_recipe_that_exists(packs):
     assert not missing, f"packs.yaml points at no such recipe: {missing}"
 
 
+def test_every_pack_actually_resolves_something_to_download(packs):
+    """A pack that resolves no files installs successfully and fetches nothing.
+
+    This is how the one authored recipe we ship broke: the planner read only
+    .generated.yaml, so image.sdxl_adult produced an empty download list. The
+    install "worked", the models never arrived, and the first generation died
+    on a missing checkpoint -- a long way from the cause, and with nothing in
+    between saying so.
+
+    Counting downloads is the check that would have caught it. A pack that
+    names files nobody can fetch is not installable, whatever the row says.
+    """
+    from pathlib import Path
+
+    from toolshed.planner.plan import _downloads_for
+
+    empty = [p.id for p in packs if not _downloads_for(p, Path("/tmp/plan-check"))]
+    assert not empty, f"these packs would install nothing at all: {empty}"
+
+
 def test_sizes_are_plausible(packs):
     """A generative model pack is gigabytes. Catching a units mistake here is
     cheaper than shipping a confirmation screen that says 0 GB.
@@ -35,21 +55,59 @@ def test_sizes_are_plausible(packs):
             assert 1e9 < p.download_bytes < 200e9, f"{p.id}: {p.download_bytes} bytes"
 
 
-def test_an_unfrozen_pack_is_shown_but_cannot_be_installed(packs):
-    """The guard that replaced "a pack with no size fails the suite".
+def test_an_unfrozen_pack_is_installable_with_a_caution(packs):
+    """Third position on this, and the last one is the owner's decision.
 
-    Failing the suite kept unverified packs out of the catalogue, but it also
-    kept them off the screen entirely, which made an unfinished feature look
-    like a missing one. Now they appear, greyed out, with the reason -- and the
-    refusal to install moved from build time to run time, where the user can
-    see it.
+    It went: failing the suite (which hid the pack), then greying the row out
+    (which showed it and refused to install it), and now installable with what
+    is unknown said on the row.
+
+    The block was also justified by something untrue -- "the download has not
+    been checked against its publisher" -- when image_sdxl_simple ships with
+    sha256 and size_bytes both PENDING_FREEZE and installs fine. What an
+    unfrozen pack actually lacks is a size estimate for the confirmation
+    screen, which is not a safety property.
     """
     for p in packs:
         if not p.is_frozen:
-            reason = p.unavailable_reason(None)
-            assert reason, f"{p.id} is unfrozen but offered as installable"
-            assert "not ready" in reason.lower()
+            assert p.unavailable_reason(None) is None, (
+                f"{p.id}: an unfrozen recipe must not block the install")
+            caution = p.caution()
+            assert caution, f"{p.id} is unverified and says nothing about it"
+            assert "not been confirmed" in caution
             assert p.size_text() == "size unknown"
+
+
+def test_an_authored_caution_is_shown_instead_of_the_automatic_one(packs):
+    """The automatic caution reasons from is_frozen, which really means "do we
+    know the download size" -- so a pack with a size estimate got no warning at
+    all, however little about it had been checked.
+
+    Liberty is exactly that case, and the thing worth saying about it is not
+    its byte count: its own author warns it returns explicit images from
+    prompts that did not ask for any.
+    """
+    liberty = next(p for p in packs if p.id == "image.liberty_adult")
+    assert liberty.is_frozen, "it has a size, so the automatic caution stays quiet"
+    said = liberty.caution()
+    assert said and "did not ask for them" in said
+    assert "\n" not in said, "authored cautions are folded YAML; unwrap them"
+
+
+def test_every_adult_pack_says_something_before_it_is_ticked(packs):
+    """Explicit material is the one place where silence on the row is not an
+    option, whatever the freeze state happens to be."""
+    for p in packs:
+        if p.adult:
+            assert p.caution(), f"{p.id} is explicit and warns nobody"
+
+
+def test_no_pack_shows_the_placeholder_token_on_screen(packs):
+    """PENDING_FREEZE stays in the data -- it is what fails a release build --
+    but it is not a thing to show a beginner now that these packs install."""
+    for p in packs:
+        assert "PENDING_FREEZE" not in p.licence_text()
+        assert "PENDING_FREEZE" not in p.size_text()
 
 
 def test_a_frozen_pack_is_not_blocked_by_this(packs):

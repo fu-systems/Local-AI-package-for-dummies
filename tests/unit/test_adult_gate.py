@@ -151,6 +151,33 @@ class TestTheGateOnScreen:
         row.checkbox.setChecked(True)
         assert page.selected() == []
 
+    def test_an_unfrozen_pack_can_be_ticked_and_reaches_the_plan(self, qapp):
+        """The point of the change: after unlocking, it actually installs.
+
+        EXPLICIT is unfrozen here (no download_bytes), which used to grey the
+        row out behind the gate -- so somebody could pass the age check and
+        still be unable to install the only thing behind it."""
+        unfrozen = pack("image.adult", adult=True, download_bytes=None)
+        page = ChoosePage((ORDINARY, unfrozen), BIG_CARD)
+        assert page.adult_section is not None
+        page.adult_section.unlock()
+        row = page.adult_section.rows[0]
+        assert row.checkbox.isEnabled(), "an unfrozen pack must be tickable"
+        assert row.caution, "tickable, but not silently"
+        row.checkbox.setChecked(True)
+        assert sorted(p.id for p in page.selected()) == ["image.adult", "image.zimage"]
+
+    def test_the_total_does_not_pretend_to_know_an_unknown_size(self, qapp):
+        """It contributes zero to the sum, so "at most N GB" would be false."""
+        unfrozen = pack("image.adult", adult=True, download_bytes=None)
+        page = ChoosePage((ORDINARY, unfrozen), BIG_CARD)
+        assert page.adult_section is not None
+        page.adult_section.unlock()
+        page.adult_section.rows[0].checkbox.setChecked(True)
+        said = page.total_label.text()
+        assert "at most" not in said
+        assert "do not know the size" in said
+
     def test_the_total_updates_when_an_adult_pack_is_chosen(self, qapp):
         """The confirmation figure has to include it, or the download is a
         surprise."""
@@ -222,16 +249,20 @@ class TestTheAuthoredRecipeIsReadable:
         assert "estimated_download_bytes" in pending, (
             "the download total shown to the user cannot be a guess")
 
-    def test_the_adult_pack_is_visible_but_not_installable(self):
-        """It used to be absent from the catalogue entirely, which read as a
-        missing feature rather than an unfinished one. Now the gate shows it,
-        greyed out, saying exactly why -- and it still cannot be installed
-        until its downloads have been checked against the publisher."""
+    def test_the_adult_pack_is_installable_behind_the_gate(self):
+        """It was absent, then greyed out, and is now installable with its
+        unknowns stated -- the owner's call, made knowing the recipe cannot be
+        frozen from an environment with no route to Hugging Face.
+
+        The gate itself is untouched by that. Installable still means "after
+        someone has asked to see it and ticked it", never by default.
+        """
         from toolshed.catalog.packs import adult, load_packs
 
         explicit = adult(load_packs())
-        assert [p.id for p in explicit] == ["image.sdxl_adult"]
+        assert [p.id for p in explicit] == ["image.sdxl_adult", "image.liberty_adult"]
         pack = explicit[0]
-        assert not pack.is_frozen
-        assert pack.unavailable_reason(24.0), "an unfrozen pack must not be installable"
-        assert not pack.default_checked
+        assert not pack.is_frozen, "nothing here invented a hash or a size"
+        assert pack.unavailable_reason(24.0) is None, "the owner asked for this to install"
+        assert pack.caution(), "installable, but not silently"
+        assert not pack.default_checked, "still never pre-ticked"
