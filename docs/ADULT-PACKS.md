@@ -185,3 +185,50 @@ pack cannot ship, so it stays.
   editable.
 * README: state plainly that the packs exist, are opt-in, and what the line is.
 * Video: still recommended out of the first cut, for the reasons above.
+
+## Adult video: what was evaluated, and what it needs
+
+### FramePack (lllyasviel/FramePack) — does not fit, and cannot run here
+
+Proposed by the owner as the image-to-video adult option. Read at the repo
+rather than from memory, on 2026-09-10:
+
+* **Licence: Apache 2.0.** Verified from the repo's own LICENSE file. The
+  owner's reading is right — attribution is all it asks, and the project is
+  not being sold. Licence is not what rules it out.
+* **It requires an Nvidia card.** The README states the requirement as "Nvidia
+  GPU in RTX 30XX, 40XX, 50XX series that supports fp16 and bf16", and says the
+  GTX 10XX/20XX are untested. The machine this whole request came from is an
+  AMD gfx1100. So it would not run on the card of the person asking for it,
+  and no amount of integration work changes that. Unofficial ROCm forks exist;
+  shipping one would mean vouching for something nobody here can test.
+* **It is not a ComfyUI model.** The README calls it "Official implementation
+  and desktop software", and requirements.txt pins `gradio==5.23.0` alongside
+  diffusers and transformers. It is a complete application with its own web UI
+  and its own model loading, not a checkpoint that drops into a graph. Adding
+  it would mean a second engine beside ComfyUI: another process, another port,
+  another Python environment, another thing to supervise and explain.
+  Everything this app does today is download a model, put it where ComfyUI
+  looks, inject a workflow, and drive one HTTP API.
+* The ComfyUI wrapper route (a third-party custom node) is not open either:
+  nothing here installs custom nodes. `custom_nodes: []` is written into every
+  recipe by derive_catalog.py and no code reads it; runner.py only creates the
+  directory.
+
+Recorded so it is not re-argued. If someone with an Nvidia card wants
+FramePack, running it standalone from its own repo is the sane path, and
+nothing in Toolshed prevents that.
+
+### What the request actually needs
+
+Easy-mode image-to-video already works. `video/01 Text or picture to video`
+carries a `LoadImage` feeding `Wan22ImageToVideoLatent`, and make.py uploads a
+chosen picture through it — so the pipeline the request wants exists and is
+shipped. What is missing is a model in it that will produce explicit output.
+
+That is a LoRA on the Wan 2.2 graph rather than a new engine, and the mechanism
+is already proven here: image_qwen_image_edit_2511_int8 ships a LoRA, and
+planner/plan.py now accepts a direct `url:` so a community file can be named.
+What is missing is the file itself, which has to come from someone who can
+reach the host — this environment cannot (the gateway refuses CONNECT to both
+civitai.com and huggingface.co).
